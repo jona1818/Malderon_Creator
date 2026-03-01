@@ -1,0 +1,51 @@
+# Secrets
+.env
+*.env
+
+# Claude Code internal files
+.agent/
+.agents/
+.claude/
+
+# Local update/backup folders
+update_v1.3.9/
+
+# Generated project output (videos, audio, images)
+/projects/
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+server.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# Archives
+*.zip
+
+# Claude skills lock (local tool config)
+skills-lock.json
