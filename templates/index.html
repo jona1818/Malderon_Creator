@@ -1,11 +1,13 @@
 <!DOCTYPE html>
 <html lang="es">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>YouTube Video Creator</title>
   <link rel="stylesheet" href="/static/css/style.css" />
 </head>
+
 <body>
   <div class="app">
 
@@ -22,6 +24,9 @@
         </button>
         <button class="nav-btn" data-view="new">
           <span>➕</span> Nuevo Video
+        </button>
+        <button class="nav-btn" data-view="settings">
+          <span>⚙️</span> Settings
         </button>
       </nav>
 
@@ -67,38 +72,20 @@
 
             <div class="form-group">
               <label>Título del video *</label>
-              <input
-                type="text"
-                id="title"
-                placeholder="Ej: Los 10 datos más curiosos sobre el espacio"
-                required
-              />
+              <input type="text" id="title" placeholder="Ej: Los 10 datos más curiosos sobre el espacio" required />
             </div>
 
             <!-- ── Reference Videos ──────────────────────────────────── -->
             <div class="form-group">
-              <label>Videos de Referencia de YouTube <span class="optional">(opcional, máx. 3 — para estructurar el guion)</span></label>
+              <label>Videos de Referencia de YouTube <span class="optional">(opcional, máx. 3 — para estructurar el
+                  guion)</span></label>
               <div class="ref-input-row">
-                <input
-                  type="text"
-                  id="refUrlInput"
-                  placeholder="https://www.youtube.com/watch?v=..."
-                />
+                <input type="text" id="refUrlInput" placeholder="https://www.youtube.com/watch?v=..." />
                 <button type="button" class="btn btn-ghost" id="refAddBtn" onclick="addReferenceVideo()">
                   Agregar
                 </button>
               </div>
               <div id="referenceList" class="reference-list"></div>
-            </div>
-
-            <div class="form-group">
-              <label>Topic *</label>
-              <textarea
-                id="topic"
-                rows="3"
-                placeholder="Describe el tema. Ej: Los planetas del sistema solar, datos curiosos y sorprendentes para el publico general."
-                required
-              ></textarea>
             </div>
 
             <div class="form-group">
@@ -188,12 +175,10 @@
             </div>
 
             <div class="form-group" id="characterGroup">
-              <label>Personaje / Estilo de referencia <span class="optional">(opcional, solo modo Animado)</span></label>
-              <input
-                type="text"
-                id="referenceCharacter"
-                placeholder="Ej: cartoon style, anime, photorealistic, pixar style"
-              />
+              <label>Personaje / Estilo de referencia <span class="optional">(opcional, solo modo
+                  Animado)</span></label>
+              <input type="text" id="referenceCharacter"
+                placeholder="Ej: cartoon style, anime, photorealistic, pixar style" />
             </div>
 
             <div class="form-actions">
@@ -265,28 +250,14 @@
           <!-- Chunk size config (solo cuando awaiting_approval) -->
           <div class="chunk-config-bar" id="chunkConfigBar" style="display:none">
             <label class="chunk-config-label">Tamaño de chunk:</label>
-            <input
-              type="number"
-              id="chunkSizeInput"
-              class="chunk-config-input"
-              value="1500"
-              min="300"
-              max="5000"
-              step="100"
-              oninput="updateChunkPreview()"
-            />
+            <input type="number" id="chunkSizeInput" class="chunk-config-input" value="1500" min="300" max="5000"
+              step="100" oninput="updateChunkPreview()" />
             <span class="chunk-config-unit">caracteres</span>
             <span class="chunk-config-preview" id="chunkPreview"></span>
           </div>
           <!-- Textarea editable (awaiting_approval) -->
-          <textarea
-            id="approvalTextarea"
-            class="approval-textarea"
-            rows="22"
-            placeholder="El script aparecerá aquí…"
-            oninput="updateChunkPreview()"
-            style="display:none"
-          ></textarea>
+          <textarea id="approvalTextarea" class="approval-textarea" rows="22" placeholder="El script aparecerá aquí…"
+            oninput="updateChunkPreview()" style="display:none"></textarea>
           <!-- Lectura (después de aprobación) -->
           <div id="scriptContent" class="script-content" style="display:none"></div>
         </div>
@@ -309,6 +280,12 @@
           </div>
 
           <div class="voice-config-body">
+            <!-- No-key warning (shown when settings has no key for selected provider) -->
+            <div id="voiceNoKeyWarning" class="vconfig-no-key-warning" style="display:none">
+              ⚠️ No hay API key guardada para este proveedor.
+              <a href="#" onclick="showView('settings'); return false;">Configúrala en Settings</a>
+            </div>
+
             <!-- Provider selector -->
             <div class="vconfig-group">
               <label class="vconfig-label">API de Voz</label>
@@ -319,30 +296,13 @@
               </select>
             </div>
 
-            <!-- API Key -->
-            <div class="vconfig-group">
-              <label class="vconfig-label">API Key</label>
-              <input
-                type="password"
-                id="ttsApiKey"
-                class="vconfig-input"
-                placeholder="Pega tu API key aquí"
-                autocomplete="off"
-              />
-            </div>
-
             <!-- Voice browser (GenAIPro only) -->
             <div id="voiceListSection" class="vconfig-voice-list-section" style="display:none">
               <div class="vconfig-voice-list-header">
                 <label class="vconfig-label">Seleccionar voz</label>
                 <div class="vconfig-voice-list-controls">
-                  <input
-                    type="text"
-                    id="voiceSearch"
-                    class="vconfig-input voice-search-input"
-                    placeholder="Buscar por nombre, género, idioma…"
-                    oninput="filterVoices()"
-                  />
+                  <input type="text" id="voiceSearch" class="vconfig-input voice-search-input"
+                    placeholder="Buscar por nombre, género, idioma…" oninput="filterVoices()" />
                   <button class="btn btn-ghost btn-sm" onclick="loadVoices()">🔃 Cargar voces</button>
                 </div>
               </div>
@@ -363,15 +323,8 @@
               <span id="voiceChunksInfo" class="vconfig-chunks-info"></span>
               <div class="resplit-bar">
                 <label class="chunk-config-label">Re-dividir en:</label>
-                <input
-                  type="number"
-                  id="resplitInput"
-                  class="chunk-config-input"
-                  value="1500"
-                  min="300"
-                  max="5000"
-                  step="100"
-                />
+                <input type="number" id="resplitInput" class="chunk-config-input" value="1500" min="300" max="5000"
+                  step="100" />
                 <span class="chunk-config-unit">chars</span>
                 <button class="btn btn-ghost btn-sm" onclick="resplitChunks()">↺ Aplicar</button>
               </div>
@@ -406,8 +359,24 @@
               🔄 Regenerar Voiceover
             </button>
             <button class="btn btn-success" onclick="approveAudio()">
-              ✅ Aprobar Audio y Continuar
+              ✅ Aprobar Audio
             </button>
+          </div>
+          <div class="voiceover-continue-actions" id="voiceoverContinueActions" style="display:none">
+            <button class="btn btn-primary btn-lg" onclick="continueWithScenes()">
+              ▶️ Continuar con Escenas
+            </button>
+            <p class="voiceover-continue-hint">
+              Se dividirá el audio en escenas de 5 segundos usando el SRT generado.
+            </p>
+          </div>
+          <div class="voiceover-retry-actions" id="voiceoverRetryActions" style="display:none">
+            <button class="btn btn-warning btn-lg" onclick="resetToAudioApproved()">
+              🔄 Reintentar desde Audio Aprobado
+            </button>
+            <p class="voiceover-continue-hint">
+              El voiceover ya está listo. Esto limpiará los chunks con error y te permitirá crear las escenas de nuevo.
+            </p>
           </div>
         </div>
 
@@ -419,14 +388,36 @@
           <div id="chunksList" class="chunks-list"></div>
         </div>
 
+        <!-- 4b. Imágenes panel — visible en estados scenes_ready / generating_images / images_ready -->
+        <div class="scenes-ready-section card" id="scenesReadySection" style="display:none">
+          <div class="scenes-ready-header">
+            <span id="scenesReadyLabel">✅ Escenas listas para generar imágenes</span>
+            <span id="imagesProgressCount" class="images-progress-count" style="display:none"></span>
+          </div>
+          <button class="btn btn-primary btn-lg" id="generateImagesBtn" onclick="generateImages()">
+            🎨 Generar Imágenes con Google Imagen
+          </button>
+          <button class="btn btn-success btn-lg" id="continueWithVideoBtn" style="display:none"
+            onclick="continueWithVideo()">
+            ▶️ Continuar con Video
+          </button>
+          <p class="scenes-ready-hint" id="scenesReadyHint">
+            Claude generará un prompt visual para cada escena y Google Imagen 3 creará la imagen correspondiente.
+          </p>
+          <div id="metaAnimationSection"
+            style="margin-top:20px; padding-top:20px; border-top:1px solid var(--border-color); display:none">
+            <h3>🤖 Meta AI Automation</h3>
+            <p class="scenes-ready-hint">Las imágenes y prompts de movimiento están listos. Inicia la animación de todas
+              las escenas.</p>
+            <button class="btn btn-primary btn-lg" id="generateMetaAnimationBtn" onclick="startMetaAnimation()">
+              🎬 Generar Animaciones (Meta AI)
+            </button>
+          </div>
+        </div>
+
         <!-- 5. Video final -->
         <div class="video-preview-container" id="videoPreviewContainer" style="display:none">
-          <video
-            id="videoPreview"
-            controls
-            autoplay
-            class="video-preview"
-          ></video>
+          <video id="videoPreview" controls autoplay class="video-preview"></video>
         </div>
 
         <!-- Logs -->
@@ -442,6 +433,167 @@
 
       </section>
 
+      <!-- ── Settings view ──────────────────────────────────────────── -->
+      <section class="view" id="view-settings">
+        <div class="view-header">
+          <h1>⚙️ Settings</h1>
+        </div>
+
+        <!-- 0. Meta AI Automation -->
+        <div class="settings-card" style="border-left: 4px solid var(--accent-blue)">
+          <h2 class="settings-card-title">🤖 Meta AI (Animación)</h2>
+          <p class="settings-card-hint">Inicia sesión en Meta AI una vez para que el bot de animación pueda operar de
+            forma automática.</p>
+          <div class="settings-actions" style="margin-top:10px; justify-content: flex-start;">
+            <button class="btn btn-primary" onclick="triggerMetaLogin()">🔗 Vincular/Login Meta AI</button>
+          </div>
+        </div>
+
+        <!-- 1. API Keys -->
+        <div class="settings-card">
+          <h2 class="settings-card-title">🔑 API Keys</h2>
+          <p class="settings-card-hint">Las claves se guardan de forma segura. Nunca se muestran en texto plano.</p>
+
+          <div class="settings-grid">
+            <div class="settings-field">
+              <label class="settings-label">Anthropic (Claude)</label>
+              <div class="settings-key-row">
+                <input type="password" id="setting_anthropic_api_key" class="settings-input" placeholder="sk-ant-..."
+                  autocomplete="off" />
+                <button class="btn btn-ghost btn-sm" onclick="saveSetting('anthropic_api_key')">Guardar</button>
+              </div>
+            </div>
+
+            <div class="settings-field">
+              <label class="settings-label">Genaipro.vn</label>
+              <div class="settings-key-row">
+                <input type="password" id="setting_genaipro_api_key" class="settings-input"
+                  placeholder="API key de Genaipro" autocomplete="off" />
+                <button class="btn btn-ghost btn-sm" onclick="saveSetting('genaipro_api_key')">Guardar</button>
+              </div>
+            </div>
+
+            <div class="settings-field">
+              <label class="settings-label">Replicate</label>
+              <div class="settings-key-row">
+                <input type="password" id="setting_replicate_api_key" class="settings-input" placeholder="r8_..."
+                  autocomplete="off" />
+                <button class="btn btn-ghost btn-sm" onclick="saveSetting('replicate_api_key')">Guardar</button>
+              </div>
+            </div>
+
+            <div class="settings-field">
+              <label class="settings-label">Pexels</label>
+              <div class="settings-key-row">
+                <input type="password" id="setting_pexels_api_key" class="settings-input"
+                  placeholder="API key de Pexels" autocomplete="off" />
+                <button class="btn btn-ghost btn-sm" onclick="saveSetting('pexels_api_key')">Guardar</button>
+              </div>
+            </div>
+
+            <div class="settings-field">
+              <label class="settings-label">Pixabay</label>
+              <div class="settings-key-row">
+                <input type="password" id="setting_pixabay_api_key" class="settings-input"
+                  placeholder="API key de Pixabay" autocomplete="off" />
+                <button class="btn btn-ghost btn-sm" onclick="saveSetting('pixabay_api_key')">Guardar</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2. Default Voice Config -->
+        <div class="settings-card">
+          <h2 class="settings-card-title">🎙️ Configuración de Voz por Defecto</h2>
+          <p class="settings-card-hint">Estos valores se usarán como punto de partida cuando configures el voiceover en
+            cada proyecto.</p>
+
+          <div class="settings-grid">
+            <div class="settings-field">
+              <label class="settings-label">Proveedor de Voz</label>
+              <select id="setting_default_tts_provider" class="settings-select">
+                <option value="genaipro">Genaipro.vn</option>
+                <option value="elevenlabs">ElevenLabs</option>
+                <option value="openai">OpenAI TTS</option>
+              </select>
+            </div>
+
+            <div class="settings-field">
+              <label class="settings-label">Voice ID por defecto</label>
+              <input type="text" id="setting_default_tts_voice_id" class="settings-input"
+                placeholder="ID de la voz (depende del proveedor)" />
+            </div>
+
+            <div class="settings-field">
+              <label class="settings-label">Modelo</label>
+              <input type="text" id="setting_default_tts_model_id" class="settings-input"
+                placeholder="eleven_multilingual_v2" />
+            </div>
+          </div>
+
+          <div class="settings-sliders">
+            <div class="settings-slider-row">
+              <label class="settings-label">Velocidad</label>
+              <input type="range" id="setting_default_tts_speed" class="settings-range" min="0.7" max="1.2" step="0.05"
+                value="1.0"
+                oninput="document.getElementById('setting_default_tts_speed_val').textContent = parseFloat(this.value).toFixed(2)" />
+              <span id="setting_default_tts_speed_val" class="settings-range-val">1.00</span>
+            </div>
+            <div class="settings-slider-row">
+              <label class="settings-label">Estabilidad</label>
+              <input type="range" id="setting_default_tts_stability" class="settings-range" min="0" max="1" step="0.05"
+                value="0.5"
+                oninput="document.getElementById('setting_default_tts_stability_val').textContent = parseFloat(this.value).toFixed(2)" />
+              <span id="setting_default_tts_stability_val" class="settings-range-val">0.50</span>
+            </div>
+            <div class="settings-slider-row">
+              <label class="settings-label">Similarity</label>
+              <input type="range" id="setting_default_tts_similarity" class="settings-range" min="0" max="1" step="0.05"
+                value="0.75"
+                oninput="document.getElementById('setting_default_tts_similarity_val').textContent = parseFloat(this.value).toFixed(2)" />
+              <span id="setting_default_tts_similarity_val" class="settings-range-val">0.75</span>
+            </div>
+            <div class="settings-slider-row">
+              <label class="settings-label">Style</label>
+              <input type="range" id="setting_default_tts_style" class="settings-range" min="0" max="1" step="0.05"
+                value="0.0"
+                oninput="document.getElementById('setting_default_tts_style_val').textContent = parseFloat(this.value).toFixed(2)" />
+              <span id="setting_default_tts_style_val" class="settings-range-val">0.00</span>
+            </div>
+          </div>
+
+          <div class="settings-actions">
+            <button class="btn btn-primary" onclick="saveVoiceDefaults()">💾 Guardar Configuración de Voz</button>
+          </div>
+        </div>
+
+        <!-- 3. Default Video Config -->
+        <div class="settings-card">
+          <h2 class="settings-card-title">🎬 Configuración de Video por Defecto</h2>
+
+          <div class="settings-grid">
+            <div class="settings-field">
+              <label class="settings-label">Modo de generación</label>
+              <select id="setting_default_video_mode" class="settings-select">
+                <option value="animated">🎨 Animado (IA)</option>
+                <option value="stock">📹 Stock Footage</option>
+              </select>
+            </div>
+
+            <div class="settings-field">
+              <label class="settings-label">Intervalo de imagen (segundos)</label>
+              <input type="number" id="setting_default_image_interval" class="settings-input" min="3" max="15" step="1"
+                value="5" />
+            </div>
+          </div>
+
+          <div class="settings-actions">
+            <button class="btn btn-primary" onclick="saveVideoDefaults()">💾 Guardar Configuración de Video</button>
+          </div>
+        </div>
+
+      </section>
+
     </main>
   </div>
 
@@ -450,4 +602,5 @@
 
   <script src="/static/js/app.js"></script>
 </body>
+
 </html>

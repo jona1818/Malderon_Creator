@@ -14,7 +14,8 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import Project, Chunk, ProjectStatus
 from ..schemas import ProjectCreate, ProjectOut, ProjectListItem, ScriptApprovalPayload, ResplitPayload, VoiceConfigPayload
-from ..services.pipeline_service import start_pipeline, start_pipeline_phase2, start_regenerate_script, start_resplit_chunks, start_generate_voiceover, start_pipeline_phase3
+from ..services.pipeline_service import start_pipeline, start_pipeline_phase2, start_regenerate_script, start_resplit_chunks, start_generate_voiceover, start_pipeline_phase3, start_create_scenes_from_srt, start_generate_images, start_retry_chunk_image, start_generate_motion_prompts, start_animate_scenes, start_regenerate_image_genaipro, start_regenerate_all_genaipro
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -270,19 +271,164 @@ def get_voiceover_audio(project_id: int, db: Session = Depends(get_db)):
 
 @router.post("/{project_id}/approve-audio", response_model=ProjectOut)
 def approve_audio(project_id: int, db: Session = Depends(get_db)):
-    """Approve the generated voiceover and start video processing (phase 3)."""
+    """Mark the voiceover as approved. Does not start phase 3 yet."""
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     if project.status != ProjectStatus.awaiting_audio_approval:
         raise HTTPException(status_code=400, detail="El proyecto no está esperando aprobación de audio")
 
+    project.status = ProjectStatus.audio_approved
+    project.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@router.post("/{project_id}/recover-srt")
+def recover_srt(project_id: int, db: Session = Depends(get_db)):
+    """Re-download the SRT from GenAIPro by creating a new TTS task for the chunk text.
+
+    Saves result to voiceover/subtitles.srt.
+    Returns {saved: bool, path: str, bytes: int, subtitle_url: str}.
+    """
+    import json as _json, requests as _req
+    from pathlib import Path as _P
+    from ..services.pipeline_service import voiceover_dir
+
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not project.tts_provider or project.tts_provider != "genaipro":
+        raise HTTPException(status_code=400, detail="Solo soportado para proyectos con GenAIPro TTS")
+    if not project.tts_api_key:
+        raise HTTPException(status_code=400, detail="API key de GenAIPro no configurada")
+
+    # Get all chunk texts concatenated
+    chunks = (
+        db.query(Chunk)
+        .filter(Chunk.project_id == project_id)
+        .order_by(Chunk.chunk_number)
+        .all()
+    )
+    text = " ".join(c.scene_text or "" for c in chunks).strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="No hay texto en los chunks")
+
+    tts_config = _json.loads(project.tts_config or "{}")
+    voice_id   = project.tts_voice_id or tts_config.get("voice_id", "")
+    if not voice_id:
+        raise HTTPException(status_code=400, detail="voice_id no configurado")
+
+    api_key  = project.tts_api_key
+    base_url = "https://genaipro.vn/api/v1"
+    headers  = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    # Create a new TTS task
+    payload = {
+        "input":      text,
+        "voice_id":   voice_id,
+        "model_id":   tts_config.get("model_id", "eleven_multilingual_v2"),
+        "speed":      float(tts_config.get("speed", 1.0)),
+        "stability":  float(tts_config.get("stability", 0.5)),
+        "similarity": float(tts_config.get("similarity", 0.75)),
+        "style":      float(tts_config.get("style", 0.0)),
+    }
+    resp = _req.post(f"{base_url}/labs/task", headers=headers, json=payload, timeout=60)
+    if not resp.ok:
+        raise HTTPException(status_code=502, detail=f"GenAIPro error: {resp.text[:300]}")
+    task_id = resp.json().get("task_id") or resp.json().get("id")
+    if not task_id:
+        raise HTTPException(status_code=502, detail=f"No task_id en respuesta: {resp.json()}")
+
+    # Poll until completed
+    import time as _time
+    deadline = _time.time() + 600
+    subtitle_url = None
+    full_data = {}
+    while _time.time() < deadline:
+        pr = _req.get(f"{base_url}/labs/task/{task_id}", headers={"Authorization": f"Bearer {api_key}"}, timeout=30)
+        pr.raise_for_status()
+        full_data = pr.json()
+        status = full_data.get("status", "").lower()
+        if status == "completed":
+            subtitle_url = (
+                full_data.get("subtitle")
+                or full_data.get("subtitle_url")
+                or full_data.get("srt")
+                or full_data.get("srt_url")
+            )
+            break
+        if status in ("failed", "error", "cancelled"):
+            raise HTTPException(status_code=502, detail=f"Task falló: {full_data}")
+        _time.sleep(5)
+    else:
+        raise HTTPException(status_code=504, detail="Timeout esperando GenAIPro")
+
+    if not subtitle_url:
+        return {
+            "saved": False,
+            "path": None,
+            "bytes": 0,
+            "subtitle_url": None,
+            "response_keys": list(full_data.keys()),
+            "message": "GenAIPro no retornó URL de subtitulos en esta respuesta",
+        }
+
+    # Download SRT
+    srt_resp = _req.get(subtitle_url, timeout=60)
+    srt_resp.raise_for_status()
+    srt_bytes = srt_resp.content
+
+    vo = voiceover_dir(project.slug)
+    vo.mkdir(parents=True, exist_ok=True)
+    srt_path = vo / "subtitles.srt"
+    srt_path.write_bytes(srt_bytes)
+
+    return {
+        "saved": True,
+        "path": str(srt_path),
+        "bytes": len(srt_bytes),
+        "subtitle_url": subtitle_url,
+        "message": f"SRT descargado y guardado: {len(srt_bytes)} bytes",
+    }
+
+
+@router.post("/{project_id}/create-scenes-from-srt", response_model=ProjectOut)
+def create_scenes_from_srt(project_id: int, db: Session = Depends(get_db)):
+    """Parse global SRT → create scene chunks → start video generation (phase 3)."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not project.voiceover_path:
+        raise HTTPException(status_code=400, detail="No hay voiceover generado para este proyecto")
+
     project.status = ProjectStatus.queued
     project.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(project)
 
-    start_pipeline_phase3(project.id)
+    start_create_scenes_from_srt(project.id)
+    return project
+
+
+@router.post("/{project_id}/reset-to-audio-approved", response_model=ProjectOut)
+def reset_to_audio_approved(project_id: int, db: Session = Depends(get_db)):
+    """Reset a stuck/errored project to audio_approved so the user can retry scene creation."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not project.voiceover_path:
+        raise HTTPException(status_code=400, detail="No hay voiceover generado para este proyecto")
+
+    # Clear all chunks so create-scenes-from-srt starts fresh
+    db.query(Chunk).filter(Chunk.project_id == project_id).delete()
+
+    project.status = ProjectStatus.audio_approved
+    project.error_message = None
+    project.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(project)
     return project
 
 
@@ -324,3 +470,135 @@ def retry_project(project_id: int, db: Session = Depends(get_db)):
 
     start_pipeline(project.id)
     return project
+
+
+@router.post("/{project_id}/generate-images", response_model=ProjectOut)
+def generate_images(project_id: int, db: Session = Depends(get_db)):
+    """Launch Replicate Seedream 4.5 image generation for all scene chunks."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.status not in (ProjectStatus.scenes_ready, ProjectStatus.images_ready, ProjectStatus.error):
+        raise HTTPException(status_code=400, detail="El proyecto no está en un estado válido para generar imágenes")
+
+    project.status = ProjectStatus.queued
+    project.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(project)
+
+    start_generate_images(project.id)
+    return project
+
+
+@router.get("/{project_id}/chunk/{chunk_number}/image")
+def get_chunk_image(project_id: int, chunk_number: int, db: Session = Depends(get_db)):
+    """Serve the generated image for a specific scene chunk."""
+    chunk = db.query(Chunk).filter(
+        Chunk.project_id == project_id,
+        Chunk.chunk_number == chunk_number,
+    ).first()
+    if not chunk:
+        raise HTTPException(status_code=404, detail="Chunk no encontrado")
+    if not chunk.image_path:
+        raise HTTPException(status_code=404, detail="No hay imagen generada para esta escena")
+    img_path = Path(chunk.image_path)
+    if not img_path.exists():
+        raise HTTPException(status_code=404, detail=f"Archivo de imagen no encontrado: {chunk.image_path}")
+    # Detect mime type from extension
+    suffix = img_path.suffix.lower()
+    media_types = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+    media_type = media_types.get(suffix, "image/jpeg")
+    return FileResponse(str(img_path), media_type=media_type)
+
+
+@router.post("/{project_id}/retry-chunk-image/{chunk_number}", response_model=ProjectOut)
+def retry_chunk_image(project_id: int, chunk_number: int, db: Session = Depends(get_db)):
+    """Re-generate the image for a single scene chunk using Replicate Seedream 4.5."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.status not in (ProjectStatus.images_ready, ProjectStatus.generating_images, ProjectStatus.scenes_ready):
+        raise HTTPException(status_code=400, detail="El proyecto debe estar en estado images_ready, generating_images o scenes_ready")
+
+    chunk = db.query(Chunk).filter(Chunk.project_id == project_id, Chunk.chunk_number == chunk_number).first()
+    if not chunk:
+        raise HTTPException(status_code=404, detail=f"Chunk {chunk_number} no encontrado")
+
+    start_retry_chunk_image(project.id, chunk_number)
+    return project
+
+class MotionPromptUpdate(BaseModel):
+    motion_prompt: str
+
+@router.put("/{project_id}/chunk/{chunk_number}/motion-prompt", response_model=ProjectOut)
+def update_chunk_motion_prompt(project_id: int, chunk_number: int, payload: MotionPromptUpdate, db: Session = Depends(get_db)):
+    """Manually update the motion prompt for a specific chunk."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    chunk = db.query(Chunk).filter(Chunk.project_id == project_id, Chunk.chunk_number == chunk_number).first()
+    if not chunk:
+        raise HTTPException(status_code=404, detail=f"Chunk {chunk_number} no encontrado")
+
+    chunk.motion_prompt = payload.motion_prompt
+    chunk.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(project)
+    return project
+
+@router.post("/{project_id}/generate-motion-prompts", response_model=ProjectOut)
+def generate_motion_prompts_manually(project_id: int, db: Session = Depends(get_db)):
+    """Trigger the motion prompts generation step manually for all chunks."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+        
+    start_generate_motion_prompts(project.id)
+    return project
+
+@router.post("/{project_id}/start-animation", response_model=ProjectOut)
+def start_animation(project_id: int, db: Session = Depends(get_db)):
+    """Trigger the mass animation phase using Meta AI."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    start_animate_scenes(project.id)
+    return project
+
+
+@router.post("/{project_id}/scenes/{chunk_number}/regenerate-genaipro", response_model=ProjectOut)
+def regenerate_scene_image_genaipro(project_id: int, chunk_number: int, db: Session = Depends(get_db)):
+    """Re-generate the image for one scene using Genaipro Veo (uses existing image_prompt)."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    chunk = (
+        db.query(Chunk)
+        .filter(Chunk.project_id == project_id, Chunk.chunk_number == chunk_number)
+        .first()
+    )
+    if not chunk:
+        raise HTTPException(status_code=404, detail=f"Chunk {chunk_number} no encontrado")
+    if not chunk.image_prompt:
+        raise HTTPException(
+            status_code=400,
+            detail="Esta escena no tiene image_prompt guardado. Genera las imágenes completas primero."
+        )
+
+    start_regenerate_image_genaipro(project_id, chunk_number)
+    return project
+
+
+@router.post("/{project_id}/regenerate-all-genaipro", response_model=ProjectOut)
+def regenerate_all_images_genaipro(project_id: int, db: Session = Depends(get_db)):
+    """Re-generate images for ALL scenes that have an image_prompt using Genaipro Veo."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    start_regenerate_all_genaipro(project_id)
+    return project
+

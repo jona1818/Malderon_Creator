@@ -13,3 +13,6 @@ sse-starlette==2.1.3
 pydantic-settings==2.6.1
 requests==2.32.3
 youtube-transcript-api==1.2.4
+google-genai>=1.0.0
+playwright>=1.40.0
+mutagen>=1.47.0

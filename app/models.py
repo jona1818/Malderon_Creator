@@ -14,6 +14,10 @@ class ProjectStatus(str, enum.Enum):
     awaiting_approval = "awaiting_approval"
     awaiting_voice_config = "awaiting_voice_config"
     awaiting_audio_approval = "awaiting_audio_approval"
+    audio_approved = "audio_approved"
+    scenes_ready = "scenes_ready"
+    generating_images = "generating_images"
+    images_ready = "images_ready"
     done = "done"
     error = "error"
 
@@ -78,6 +82,8 @@ class Chunk(Base):
     status = Column(SAEnum(ChunkStatus), default=ChunkStatus.pending, nullable=False)
     scene_text = Column(Text, nullable=True)
     image_prompt = Column(Text, nullable=True)
+    video_prompt = Column(Text, nullable=True)
+    motion_prompt = Column(Text, nullable=True)
     search_keywords = Column(String(512), nullable=True)
     audio_path = Column(String(512), nullable=True)
     image_path = Column(String(512), nullable=True)
@@ -112,3 +118,11 @@ class Log(Base):
     timestamp = Column(DateTime, default=datetime.utcnow)
 
     project = relationship("Project", back_populates="logs")
+
+
+class AppSetting(Base):
+    """Global key-value settings store (API keys, defaults, etc.)."""
+    __tablename__ = "settings"
+
+    key = Column(String(100), primary_key=True)
+    value = Column(Text, nullable=True)

@@ -1,0 +1,500 @@
+---
+title: VidRush Prompting Guide
+description: Complete guide to creating effective prompts for VidRush video generation
+---
+
+# VidRush Prompting Guide
+
+## Core Principles
+
+### 1. Structure Your Prompts as Talking Point Lists
+VidRush works best with clear, factual talking points rather than creative writing or vague directions. The AI needs concrete information to build around.
+
+**Good Structure:**
+- Point 1: [Specific fact or event]
+- Point 2: [Related information]
+- Point 3: [Supporting detail]
+
+**Avoid:**
+- Long paragraphs of prose
+- Vague creative directions
+- Editing instructions (the AI won't see these)
+
+### 2. The Golden Rule of Talking Points
+- **6-8 minute video:** 4-5 talking points
+- **10-12 minute video:** 7-8 talking points
+- **30-40 minute video:** 20-30 talking points
+- **Rule of thumb:** Approximately 0.5 talking points per minute of content
+
+Too few points = repetitive content
+Too many points = rushed, incomplete coverage
+
+### 3. Footage Availability Check
+Before finalizing your prompt, ensure matching footage exists:
+- **Good:** World War II, nature documentaries, major cities, well-known events
+- **Challenging:** Very specific crimes, niche historical events, abstract concepts
+- **Test:** Can you find multiple YouTube videos or stock footage of your topic?
+
+## Step-by-Step Prompt Creation Process
+
+### Step 1: Research and Ideation
+1. Find successful videos in your niche
+2. Export transcripts from top-performing videos
+3. Identify the structure and information density
+4. Note what topics have readily available footage
+
+### Step 2: Create Your Outline Using AI
+```
+Example prompt for Claude/ChatGPT:
+"Generate an outline with 10 detailed talking points about [TOPIC].
+Each point should include specific facts, dates, or statistics.
+Structure it for a documentary-style video.
+Use this transcript as a reference for style: [PASTE TRANSCRIPT]"
+```
+
+### Step 3: Format Your VidRush Prompt
+
+**Auto Mode Structure:**
+```
+Title: [Clear, descriptive title]
+
+Create a [duration]-minute documentary about [topic].
+
+Main talking points:
+1. [First major point with specific details]
+   - Supporting fact A
+   - Supporting fact B
+
+2. [Second major point]
+   - Supporting detail
+   - Specific example
+
+[Continue for all points]
+
+Style: [Documentary/investigative/educational]
+Tone: [Serious/engaging/mysterious]
+```
+
+**Manual Mode Additional Elements:**
+- Reference video link (for style matching)
+- Target audience description
+- Key facts to emphasize
+
+### Step 4: Clean Your Custom Scripts
+If using custom scripts:
+1. Remove all formatting marks
+2. Delete stage directions
+3. Remove speaker labels
+4. Keep ONLY what should be narrated
+5. Check for special characters that might be read aloud
+
+## Prompt Templates by Video Type
+
+### Documentary Style
+```
+Create a 10-minute investigative documentary about [TOPIC].
+
+Historical Context:
+- [Background point 1]
+- [Background point 2]
+
+Current Situation:
+- [Present-day fact 1]
+- [Present-day fact 2]
+- [Statistics or data]
+
+Expert Perspectives:
+- [Authority quote or position]
+- [Contrasting viewpoint]
+
+Future Implications:
+- [Projection or trend]
+- [Potential outcomes]
+
+Tone: Serious and analytical
+Style: Professional documentary
+```
+
+### Top 10/Listicle Style
+```
+Create a 12-minute top 10 video about [TOPIC].
+
+Introduction:
+- Hook: [Attention-grabbing statement]
+- Overview of what viewers will learn
+
+10. [Least impactful item]
+- Key fact
+- Why it matters
+
+9. [Next item]
+- Main point
+- Supporting detail
+
+[Continue through to #1]
+
+1. [Most impactful item]
+- Major revelation
+- Lasting impact
+
+Conclusion:
+- Summary of key takeaways
+- Call to action
+
+Style: Engaging countdown
+Tone: Informative but entertaining
+```
+
+### Mystery/Investigation Style
+```
+Create a 15-minute investigation into [MYSTERIOUS TOPIC].
+
+The Mystery:
+- Initial discovery/incident
+- Key questions raised
+- Stakes involved
+
+The Investigation:
+- Evidence found
+- Expert analysis
+- Conflicting theories
+
+Revealing Details:
+- Breakthrough discovery
+- Hidden connections
+- Unexpected findings
+
+The Truth:
+- Most likely explanation
+- Supporting evidence
+- Remaining questions
+
+Style: Suspenseful investigation
+Tone: Mysterious and compelling
+```
+
+## Advanced Prompting Strategies
+
+### 1. Reference Video Matching
+When using reference videos in manual mode:
+- Choose videos with human narration for natural writing style
+- Avoid videos with excessive 3D animation (footage won't match)
+- Select references from similar content genres
+
+### 2. Handling Abstract Concepts
+For topics without obvious footage:
+```
+Frame abstract ideas with concrete examples:
+- Instead of "economic inflation"
+- Use "shoppers looking at high prices, empty shelves, worried families"
+```
+
+### 3. Optimizing for Footage Matching
+Structure talking points to mention:
+- Specific locations
+- Named individuals
+- Particular events
+- Visual objects
+- Time periods
+
+### 4. Multi-Source Prompting
+Combine multiple approaches:
+```
+Part 1: Use transcript-based outline
+Part 2: Add current statistics
+Part 3: Include specific visual cues
+Part 4: Reference trending angles
+```
+
+## Common Pitfalls to Avoid
+
+### 1. Prompt Mistakes
+❌ "Use dramatic transitions"  
+❌ "Include this specific animation"  
+❌ "Put text on screen saying..."  
+✅ Focus on WHAT to talk about, not HOW to show it
+
+### 2. Length Miscalculation
+Account for voiceover speed variations
+Fast voices = shorter videos
+Slow voices = longer videos
+Build in 2-minute margin of error
+
+### 3. Footage Mismatches
+Avoid ultra-specific events without documentation
+Don't assume footage exists for everything
+Research visual availability before committing
+
+### 4. Script Formatting Errors
+Leaving in "NARRATOR:" labels
+Including [PAUSE] or [MUSIC] directions
+Keeping timestamp markers
+Using special characters unnecessarily
+
+## Quality Optimization Tips
+
+### 1. Pre-Production Checklist
+Sufficient talking points for target length
+Each point has concrete, visual elements
+Footage likely exists for all topics
+No formatting that will be read aloud
+Clear narrative flow from point to point
+
+### 2. Theme Selection Impact
+Crime/History theme: Darker maps, dramatic fonts
+Standard theme: Satellite imagery, clean graphics
+Choose based on: Content tone, not personal preference
+
+### 3. Voice Selection Strategy
+Test multiple voices with short segments
+Some voices are more stable than others
+Match voice energy to content style
+Consider accent appropriateness for topic
+
+### 4. Iteration Approach
+If first attempt isn't perfect:
+Note what worked well
+Identify footage mismatches
+Adjust talking points for better visual alignment
+Refine prompt specificity
+Try different reference video (manual mode)
+
+## Final Pre-Generation Checklist
+Before hitting "GO":
+
+**Prompt Check:**
+Clear talking points?
+Appropriate detail level?
+Clean formatting?
+
+**Footage Feasibility:**
+Can you imagine the visuals?
+Does similar content exist online?
+Are locations/events documented?
+
+**Length Calculation:**
+Points-per-minute ratio correct?
+Buffer for voiceover speed?
+Not trying to cram too much?
+
+**Style Consistency:**
+Reference video matches intent?
+Talking points match reference style?
+Tone appropriate for audience?
+
+Remember: VidRush is still pre-1.0. The system works best with factual content, clear structure, and topics with abundant footage. As the platform evolves, capabilities will expand, but mastering these fundamentals will ensure consistent quality output regardless of updates.
+
+---
+
+## VidRush Prompt Examples: Best Practices in Action
+
+### Example 1: Documentary Style (10-12 minutes)
+**Best for: Historical events, investigative topics, educational content**
+```
+Create a 10-minute investigative documentary about The Grand Ethiopian Renaissance Dam.
+
+Historical Context:
+- Colonial-era treaties gave Egypt control over Nile waters, excluded Ethiopia
+- Ethiopia began construction in 2011 without downstream approval
+- $5 billion investment, Africa's largest hydroelectric project
+
+Current Situation:
+- Dam 80% complete, filling reservoir since 2020
+- Generates 6,450 MW of electricity when fully operational
+- Ethiopia aims to become regional electricity exporter
+- Located on Blue Nile, supplies 85% of Nile water
+
+The Water Conflict:
+- Egypt fears reduced water flow threatens 100 million citizens
+- Sudan caught between benefits (flood control) and risks (dam safety)
+- No binding agreement reached after decade of negotiations
+- Military tensions escalated with threats from Egyptian officials
+
+Engineering Details:
+- 155 meters high, 1,780 meters long concrete structure
+- Reservoir capacity of 74 billion cubic meters
+- Can withstand magnitude 8 earthquake
+- Turbines manufactured by European companies despite pressure
+
+Future Implications:
+- Sets precedent for upstream nations controlling rivers
+- Climate change making water more scarce
+- Could trigger regional water wars or cooperation
+- Symbolizes Africa's push for energy independence
+
+Style: Serious investigative journalism
+Tone: Neutral but highlighting tensions
+```
+
+### Example 2: Top 10 Listicle (12-15 minutes)
+**Best for: Ranking videos, shocking revelations, entertainment-focused content**
+```
+Create a 15-minute countdown video about 10 Ancient Egyptian Discoveries That Shatter History.
+
+Introduction:
+- Hook: Egypt isn't what textbooks taught us
+- These discoveries prove we've been wrong about ancient civilization
+
+10. Merer's Logbook - The Pyramid Supply Chain
+- Papyrus details daily limestone deliveries to Great Pyramid
+- Names supervisors, docks, canal routes
+- Proves pyramids built by organized labor, not slaves
+- Found at Wadi el-Jarf, oldest papyrus ever discovered
+
+9. Psusennes I - The Silver Pharaoh
+- Intact tomb with pure silver sarcophagus
+- More valuable than Tutankhamun's gold
+- Discovered 1939 but overshadowed by WWII
+- Located in Tanis, not Valley of Kings
+
+8. The Great Pyramid's Hidden Void
+- 30-meter cavity discovered by cosmic ray imaging
+- Located above Grand Gallery
+- Purpose unknown - could contain burial goods
+- Found 2017, still unexplored
+
+7. Avaris Hand Pits - Proof of Ancient Brutality
+- 16 severed right hands buried in palace courtyard
+- Confirms "Gold of Valor" practice from texts
+- Soldiers presented enemy hands for gold rewards
+- Dating to Hyksos period, 1600 BCE
+
+6. Seqenenre Taa II's Execution
+- CT scans reveal multiple head wounds from different weapons
+- Captured alive, hands bound, executed ceremonially
+- Died fighting to reunite Egypt
+- Embalmers disguised wounds cosmetically
+
+[Continue through to #1]
+
+Style: Dramatic countdown
+Tone: Building suspense with each revelation
+```
+
+### Example 3: Mystery/Investigation Style (15-18 minutes)
+**Best for: Unsolved mysteries, conspiracy topics, speculative content**
+```
+Create an 18-minute investigation into Why 3I/ATLAS Isn't What NASA Says.
+
+The Official Story:
+- Discovered July 1, 2025 by ATLAS telescope
+- Third confirmed interstellar visitor after Oumuamua and Borisov
+- Classified as comet based on visible coma
+- Following hyperbolic trajectory through solar system
+
+The Anomalies Begin:
+- Mass 44 billion tons - far heavier than expected
+- No typical comet tail despite obvious outgassing
+- Trajectory aligned within 5 degrees of planetary plane
+- Will pass unusually close to Mars, Venus, and Jupiter
+
+Mars Flyby Mystery:
+- October 3, 2025 closest approach to Mars
+- Seven spacecraft positioned to observe
+- ESA released fuzzy images after days of silence
+- NASA, China, UAE remain completely quiet
+- Perseverance rover communications mysteriously interrupted
+
+The Data Blackout:
+- Unlike previous interstellar objects with daily updates
+- FOIA requests return heavily redacted documents
+- Key scientists reassigned from project
+- Raw telescope data suddenly classified
+- Public observation portals offline for "maintenance"
+
+Physical Impossibilities:
+- Non-gravitational acceleration without visible jets
+- Brightness variations suggest artificial rotation
+- Heat signature doesn't match ice sublimation
+- Spectroscopy shows unusual nickel-only emissions
+- Possible companion objects moving in formation
+
+Harvard's Bold Claims:
+- Avi Loeb assigns 30-40% chance of artificial origin
+- Trajectory appears optimized for planetary observation
+- Could be disguised probe or "Trojan horse"
+- Academic papers contradict NASA's conservative stance
+
+What Happens Next:
+- October 29 perihelion behind the Sun - perfect cover
+- December reappearance will reveal any changes
+- Jupiter encounter March 2026 could be significant
+- Pattern suggests deliberate solar system survey
+
+The Question:
+- Natural comet or something more?
+- Why the unprecedented secrecy?
+- What did those Mars observations really show?
+
+Style: Investigative thriller
+Tone: Building suspense through evidence
+```
+
+### Example 4: Crisis/News Style (8-10 minutes)
+**Best for: Current events, market crashes, urgent topics**
+```
+Create a 10-minute news documentary about Florida's Insurance Collapse 2025.
+
+The Breaking Point:
+- 15 major insurers fled Florida since 2022
+- Citizens Property Insurance now insures 1.3 million policies
+- Average premiums reached $6,000, triple national average
+- Hurricane season 2025 approaching with no coverage options
+
+The Numbers:
+- 400,000 policies dropped in past 12 months
+- Premium increases of 40-60% for those keeping coverage
+- $3 billion in claims from 2024 storms still unpaid
+- Citizens Insurance facing $500 billion exposure
+
+Ground Zero - Coastal Communities:
+- Fort Myers: 78% uninsured or underinsured
+- Miami Beach: Luxury condos losing 30% value
+- Tampa Bay: Mass exodus of residents
+- Keys: Some islands becoming uninsurable zones
+
+Why Insurers Are Running:
+- Climate models show Category 5 storms becoming common
+- Reinsurance costs quadrupled since 2020
+- Legal environment allows excessive claims
+- Building codes inadequate for new storm intensity
+- Fraud adding 15% to all premiums
+
+The Human Cost:
+- Families forced to self-insure or leave
+- Mortgages requiring insurance can't be maintained
+- Retirement savings wiped out by one storm
+- Multi-generational homes abandoned
+
+Government Response Failure:
+- State fund undercapitalized by $470 billion
+- Legislative reforms blocked by lobbying
+- Federal backstop proposals rejected
+- No comprehensive solution proposed
+
+Market Collapse Indicators:
+- Home sales down 67% in high-risk zones
+- Property values declining 2-5% monthly
+- Construction halted on new developments
+- Banks restricting mortgages in coastal areas
+
+What's Next:
+- 2025 hurricane season predictions severe
+- Citizens Insurance could collapse with one major storm
+- Federal intervention may be required
+- Mass climate migration beginning
+
+Style: Urgent news documentary
+Tone: Serious, fact-driven crisis reporting
+```
+
+## Key Formatting Rules Applied:
+Clear talking points with specific facts and figures
+Visual elements described (locations, events, objects)
+Appropriate length with right number of points
+Clean formatting - no special characters or stage directions
+Documentary/news style specified at the end
+Concrete details that matching footage likely exists for
+Narrative flow from point to point
+No editing instructions - focus on content only
+These examples can be directly copied and modified for your specific topics while maintaining the proven VidRush formula.

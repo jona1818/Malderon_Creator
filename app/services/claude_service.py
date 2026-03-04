@@ -62,19 +62,21 @@ Return JSON:
   ]
 }}"""
 
-IMAGE_PROMPT_SYSTEM = """You are an expert AI image prompt engineer.
-Create vivid, detailed prompts for image generation models.
+IMAGE_PROMPT_SYSTEM = """You are a visual prompt engineer for AI image generation.
+Create detailed, cinematic image prompts optimized for Seedream 4.5.
 Return ONLY valid JSON - no markdown fences, no extra text."""
 
-IMAGE_PROMPT_TEMPLATE = """Create an image generation prompt for this video scene:
+IMAGE_PROMPT_TEMPLATE = """Create a detailed visual image prompt for Seedream 4.5 for this video scene:
 
 Scene narration: {narration}
 Visual description: {visual_description}
 Reference character/style: {reference_character}
 
+Style: cinematic, documentary, photorealistic. 16:9 aspect ratio, 1920x1080. No text, no watermarks, no borders.
+
 Return JSON:
 {{
-  "image_prompt": "Detailed comma-separated prompt for SDXL. Include style, lighting, composition."
+  "image_prompt": "Detailed photorealistic image prompt. Include scene composition, lighting, camera angle, color palette, mood, and visual style. Comma-separated descriptive terms."
 }}"""
 
 KEYWORDS_SYSTEM = """You are a stock footage search specialist.

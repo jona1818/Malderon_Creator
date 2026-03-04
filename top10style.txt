@@ -1,0 +1,144 @@
+Estructura correcta para un video TOP 10 / COUNTDOWN en VidRush
+1. Title
+
+Un título claro del tema.
+
+Ejemplo:
+Title: 10 Crazy Japanese Inventions That Should Exist Everywhere
+
+2. Introducción (Hook + Overview)
+
+Aquí van 2–3 talking points para abrir el video.
+
+Estructura:
+
+Hook: frase que genera curiosidad
+
+Contexto rápido
+
+Qué verá el espectador
+
+Ejemplo:
+
+Introduction:
+
+Hook: Japan has inventions so smart that once you see them, you'll wonder why the rest of the world hasn't copied them.
+
+These everyday innovations solve problems most countries still struggle with.
+
+Today we're counting down 10 incredible Japanese inventions that should exist everywhere.
+
+3. El Countdown (10 → 1)
+
+Cada número debe tener:
+
+idea principal
+
+2-3 supporting facts
+
+cosas visuales (para que VidRush encuentre footage)
+
+Formato:
+
+10. [Nombre del invento o cosa]
+
+- Qué es
+- Cómo funciona
+- Por qué es sorprendente
+
+Ejemplo:
+
+10. Heated Sidewalks That Melt Snow
+
+- Cities like Sapporo install heated pipes under sidewalks
+- Snow melts automatically without shoveling or salt
+- Keeps streets safe during heavy winter storms
+- Used widely in northern Japan where snowfall is extreme
+
+Luego:
+
+9. Automatic Taxi Doors
+
+- Taxi drivers control passenger doors with a lever
+- Prevents people from slamming doors
+- Standard across most Japanese taxi fleets
+- First-time tourists are often shocked when the door opens automatically
+
+Y así hasta el #1.
+
+4. Número 1 (El más impactante)
+
+Debe ser el más fuerte.
+
+Formato:
+
+1. [El mejor o más sorprendente]
+
+- Revelación principal
+- Impacto o por qué es increíble
+- Algo visual fuerte
+
+Ejemplo:
+
+1. Silent Ambulance System
+
+- Japanese ambulances use advanced traffic coordination
+- Traffic lights turn green automatically for emergency vehicles
+- Drivers receive alerts to move before the ambulance arrives
+- Reduces response time dramatically in crowded cities
+5. Conclusión
+
+2–3 talking points.
+
+Formato:
+
+Conclusion:
+
+- These inventions show how Japan designs everyday life with efficiency and respect
+- Many of these ideas could easily improve cities around the world
+- Which one do you think your country needs the most?
+Regla importante para duración
+
+Según VidRush:
+
+Duración	Cantidad de puntos
+8 min	4-5
+10-12 min	7-8
+12-15 min	Top 10 completo
+
+Un Top 10 normalmente dura 12-15 minutos.
+
+Fórmula rápida (la que más funciona)
+Title
+
+Create a 12-minute countdown video about [topic].
+
+Introduction:
+- Hook
+- Context
+- What viewers will learn
+
+10.
+- fact
+- fact
+- fact
+
+9.
+- fact
+- fact
+- fact
+
+...
+
+1.
+- fact
+- fact
+- fact
+
+Conclusion:
+- summary
+- reflection
+- question to viewers
+
+Style: Engaging countdown
+Tone: Informative but entertaining

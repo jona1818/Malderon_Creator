@@ -11,6 +11,7 @@ from app.database import init_db
 from app.routers import projects, logs, workers
 from app.routers import youtube
 from app.routers import tts as tts_router
+from app.routers import settings as settings_router
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -43,6 +44,7 @@ app.include_router(logs.router)
 app.include_router(workers.router)
 app.include_router(youtube.router)
 app.include_router(tts_router.router)
+app.include_router(settings_router.router)
 
 
 # ── Frontend routes ───────────────────────────────────────────────────────────

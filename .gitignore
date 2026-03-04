@@ -49,3 +49,17 @@ build/
 
 # Claude skills lock (local tool config)
 skills-lock.json
+
+# Auth / Sessions
+meta_session/
+*.session
+
+# Temp/Error files
+nul
+*.tmp
+temp/
+
+# IDE
+*.code-workspace
+.vscode/
+

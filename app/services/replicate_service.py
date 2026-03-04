@@ -15,15 +15,16 @@ from ..config import settings
 _BASE = "https://api.replicate.com/v1"
 
 
-def _headers() -> dict:
+def _headers(api_key: str = "") -> dict:
+    token = api_key or settings.replicate_api_token
     return {
-        "Authorization": f"Bearer {settings.replicate_api_token}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Prefer": "wait",          # ask Replicate to wait up to 60 s before returning
     }
 
 
-def _run_model(model_id: str, input_payload: dict, max_wait: int = 600) -> list:
+def _run_model(model_id: str, input_payload: dict, max_wait: int = 600, api_key: str = "") -> list:
     """
     Call the Replicate predictions API, poll until done, return output list.
 
@@ -31,14 +32,27 @@ def _run_model(model_id: str, input_payload: dict, max_wait: int = 600) -> list:
       "bytedance/seedream-4.5"
       "lightricks/ltx-video"
     """
-    resp = requests.post(
-        f"{_BASE}/models/{model_id}/predictions",
-        json={"input": input_payload},
-        headers=_headers(),
-        timeout=90,
-    )
-    resp.raise_for_status()
-    prediction = resp.json()
+    max_retries = 3
+    retry_delay = 5  # seconds
+    
+    for attempt in range(max_retries):
+        resp = requests.post(
+            f"{_BASE}/models/{model_id}/predictions",
+            json={"input": input_payload},
+            headers=_headers(api_key),
+            timeout=90,
+        )
+        if resp.status_code == 429:
+            print(f"[Replicate] 429 - Too many requests. Attempt {attempt+1}/{max_retries}. Retrying in {retry_delay}s...")
+            time.sleep(retry_delay)
+            retry_delay *= 2  # exponential backoff
+            continue
+        resp.raise_for_status()
+        prediction = resp.json()
+        break
+    else:
+        # If we exhausted retries
+        resp.raise_for_status()
 
     # If Prefer:wait worked we may already have a result
     status = prediction.get("status", "")
@@ -49,8 +63,8 @@ def _run_model(model_id: str, input_payload: dict, max_wait: int = 600) -> list:
     poll_url = prediction.get("urls", {}).get("get") or f"{_BASE}/predictions/{prediction['id']}"
     deadline = time.time() + max_wait
     while time.time() < deadline:
-        time.sleep(4)
-        r = requests.get(poll_url, headers=_headers(), timeout=30)
+        time.sleep(3)
+        r = requests.get(poll_url, headers=_headers(api_key), timeout=30)
         r.raise_for_status()
         p = r.json()
         status = p.get("status", "")
@@ -78,25 +92,30 @@ def _normalise_output(output) -> list:
 def generate_image(
     prompt: str,
     output_path: Path,
-    width: int = 1280,
-    height: int = 720,
+    api_key: str = "",
+    width: int = 1920,
+    height: int = 1080,
     steps: int = 30,
 ) -> Path:
     """Generate an image with ByteDance SeedDream 4.5 and save to disk."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    print(f"[Replicate Seedream] Generating image {width}x{height} for: {prompt[:80]}…")
     urls = _run_model(
         "bytedance/seedream-4.5",
         {
             "prompt": prompt,
             "width": width,
             "height": height,
+            "size": "2K",
             "num_inference_steps": steps,
             "guidance_scale": 7.5,
         },
+        api_key=api_key,
     )
     _download_file(urls[0], output_path)
+    print(f"[Replicate Seedream] Image saved: {output_path}")
     return output_path
 
 
@@ -107,6 +126,7 @@ def animate_image(
     output_path: Path,
     prompt: str = "",
     duration_seconds: float = 5.0,
+    api_key: str = "",
 ) -> Path:
     """Animate a still image into a short video clip using LTX Video."""
     output_path = Path(output_path)
@@ -128,6 +148,7 @@ def animate_image(
             "guidance_scale": 3.0,
             "num_inference_steps": 30,
         },
+        api_key=api_key
     )
     _download_file(urls[0], output_path)
     return output_path

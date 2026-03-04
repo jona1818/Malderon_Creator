@@ -8,7 +8,7 @@ from .models import ProjectStatus, ChunkStatus, VideoMode
 
 class ProjectCreate(BaseModel):
     title: str
-    topic: str
+    topic: Optional[str] = None
     mode: VideoMode
     video_type: str = "top10"
     duration: str = "6-8"
@@ -26,6 +26,8 @@ class ChunkOut(BaseModel):
     audio_path: Optional[str]
     srt_path: Optional[str]
     image_path: Optional[str]
+    image_prompt: Optional[str] = None
+    motion_prompt: Optional[str] = None
     video_path: Optional[str]
     rendered_path: Optional[str]
 
@@ -109,6 +111,18 @@ class VoiceConfigPayload(BaseModel):
     tts_api_key: str                   # raw key — stored in DB, never returned to client
     tts_voice_id: Optional[str] = None
     tts_config: Optional[str] = None  # JSON string with extra provider-specific fields
+
+
+# ── Settings ─────────────────────────────────────────────────────────────────
+
+class SettingsPayload(BaseModel):
+    """Flat dict of setting key→value pairs sent from the client."""
+    data: dict  # e.g. {"anthropic_api_key": "sk-...", "default_tts_provider": "genaipro"}
+
+
+class SettingsOut(BaseModel):
+    """Settings returned to the client (API key values are masked)."""
+    data: dict
 
 
 # ── Workers ──────────────────────────────────────────────────────────────────

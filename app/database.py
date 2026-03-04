@@ -56,3 +56,23 @@ def init_db():
                 conn.commit()
             except Exception:
                 pass  # column already exists
+
+        # Migrate: Chunk tables
+        for col_def in (
+            "ALTER TABLE chunks ADD COLUMN motion_prompt TEXT",
+        ):
+            try:
+                conn.execute(__import__("sqlalchemy").text(col_def))
+                conn.commit()
+            except Exception:
+                pass  # column already exists
+
+        # Migrate: ensure settings table exists (created by Base.metadata.create_all above,
+        # but add explicit guard for existing DBs that may not have run create_all again)
+        try:
+            conn.execute(__import__("sqlalchemy").text(
+                "CREATE TABLE IF NOT EXISTS settings (key VARCHAR(100) PRIMARY KEY, value TEXT)"
+            ))
+            conn.commit()
+        except Exception:
+            pass

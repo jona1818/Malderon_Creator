@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     pixabay_api_key: str = ""
     nca_toolkit_url: str = "http://localhost:8090"
     nca_api_key: str = ""
+    google_api_key: str = ""
+    genaipro_api_key: str = ""   # Used for TTS, image generation, and video animation
     max_workers: int = 3
     projects_dir: str = "./projects"
     database_url: str = "sqlite:///./videocreator.db"

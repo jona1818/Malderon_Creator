@@ -64,13 +64,14 @@ class GenAIProTTS(TTSProvider):
     # ── TTSProvider interface ─────────────────────────────────────────────────
 
     def generate(self, text: str, output_path: Path) -> Path:
-        voice_id         = self.config.get("voice_id", "").strip()
-        model_id         = self.config.get("model_id", "eleven_multilingual_v2")
-        style            = float(self.config.get("style",      0.0))
-        speed            = float(self.config.get("speed",      1.0))
-        similarity       = float(self.config.get("similarity", 0.75))
-        stability        = float(self.config.get("stability",  0.5))
+        voice_id          = self.config.get("voice_id", "").strip()
+        model_id          = self.config.get("model_id", "eleven_multilingual_v2")
+        style             = float(self.config.get("style",      0.0))
+        speed             = float(self.config.get("speed",      1.0))
+        similarity        = float(self.config.get("similarity", 0.75))
+        stability         = float(self.config.get("stability",  0.5))
         use_speaker_boost = bool(self.config.get("use_speaker_boost", False))
+        language_code     = self.config.get("language_code", "en")
 
         if not voice_id:
             raise ValueError(
@@ -82,26 +83,49 @@ class GenAIProTTS(TTSProvider):
         task_id = self._create_task(
             text, voice_id, model_id,
             style, speed, similarity, stability, use_speaker_boost,
+            language_code,
         )
+        print(f"[GenAIPro] task_id={task_id}")
 
         # 2. Poll until completed
-        result_url, subtitle_url = self._poll_task(task_id)
+        result_url, subtitle_url, raw_response = self._poll_task(task_id)
+        print(f"[GenAIPro] completed. result={result_url!r} subtitle={subtitle_url!r}")
+        print(f"[GenAIPro] full response keys: {list(raw_response.keys())}")
 
         # 3. Download MP3
         output_path.parent.mkdir(parents=True, exist_ok=True)
         mp3_resp = requests.get(result_url, timeout=120)
         mp3_resp.raise_for_status()
         output_path.write_bytes(mp3_resp.content)
+        print(f"[GenAIPro] MP3 guardado: {output_path} ({len(mp3_resp.content)} bytes)")
 
-        # 4. Download SRT (no Whisper needed — GenAIPro provides it)
+        # 4. Download SRT — try every field name the API may use
+        subtitle_url = (
+            subtitle_url
+            or raw_response.get("subtitle_url")
+            or raw_response.get("srt")
+            or raw_response.get("srt_url")
+            or raw_response.get("subtitles")
+        )
         if subtitle_url:
             srt_path = output_path.with_suffix(".srt")
             try:
                 srt_resp = requests.get(subtitle_url, timeout=60)
                 srt_resp.raise_for_status()
                 srt_path.write_bytes(srt_resp.content)
-            except Exception:
-                pass  # SRT is optional; audio is what matters
+                print(f"[GenAIPro] SRT descargado: {srt_path} ({len(srt_resp.content)} bytes)")
+            except Exception as e:
+                # SRT download failure does NOT fail the TTS — audio is what matters
+                print(f"[GenAIPro] AVISO: error descargando SRT desde {subtitle_url}: {e}")
+        else:
+            print(
+                f"[GenAIPro] AVISO: esta voz no retorna subtitulos (subtitle=null). "
+                f"Se usara fallback (mutagen + texto del script) al crear escenas."
+            )
+
+        # Store task_id so it can be recovered later
+        self._last_task_id = task_id
+        self._last_subtitle_url = subtitle_url
 
         return output_path
 
@@ -123,6 +147,7 @@ class GenAIProTTS(TTSProvider):
         similarity: float,
         stability: float,
         use_speaker_boost: bool,
+        language_code: str = "en",
     ) -> str:
         payload = {
             "input":             text,
@@ -133,6 +158,7 @@ class GenAIProTTS(TTSProvider):
             "similarity":        similarity,
             "stability":         stability,
             "use_speaker_boost": use_speaker_boost,
+            "language_code":     language_code,
         }
         resp = requests.post(
             f"{BASE_URL}/labs/task",
@@ -153,8 +179,11 @@ class GenAIProTTS(TTSProvider):
             raise RuntimeError(f"No task_id en la respuesta: {data}")
         return str(task_id)
 
-    def _poll_task(self, task_id: str, max_wait: int = 600) -> tuple[str, str | None]:
-        """Poll GET /labs/task/{task_id} every 5 s until status == 'completed'."""
+    def _poll_task(self, task_id: str, max_wait: int = 600) -> tuple:
+        """Poll GET /labs/task/{task_id} every 5 s until status == 'completed'.
+
+        Returns (result_url, subtitle_url_or_None, full_response_dict).
+        """
         poll_url = f"{BASE_URL}/labs/task/{task_id}"
         headers  = {"Authorization": f"Bearer {self.api_key}"}
         deadline = time.time() + max_wait
@@ -164,13 +193,20 @@ class GenAIProTTS(TTSProvider):
             r.raise_for_status()
             data   = r.json()
             status = data.get("status", "").lower()
+            print(f"[GenAIPro] poll status={status!r} keys={list(data.keys())}")
 
             if status == "completed":
                 result_url   = data.get("result", "")
-                subtitle_url = data.get("subtitle") or None
+                subtitle_url = (
+                    data.get("subtitle")
+                    or data.get("subtitle_url")
+                    or data.get("srt")
+                    or data.get("srt_url")
+                    or None
+                )
                 if not result_url:
                     raise RuntimeError(f"Task completada pero sin URL de audio: {data}")
-                return result_url, subtitle_url
+                return result_url, subtitle_url, data
 
             if status in ("failed", "error", "cancelled"):
                 raise RuntimeError(f"GenAIPro task {task_id} falló: {data}")

@@ -8,22 +8,29 @@ let pollInterval = null;
 let logEventSource = null;
 let lastLogId = 0;
 
+// Cached settings (loaded on demand)
+let _settings = {};
+
 // Reference YouTube videos collected in the form [{url, title, transcript}]
 const referenceVideos = [];
 
 const STATUS_ICONS = {
-  queued:                  '🕐',
-  processing:              '⚙️',
-  awaiting_approval:       '✏️',
-  awaiting_voice_config:   '🎙️',
+  queued: '🕐',
+  processing: '⚙️',
+  awaiting_approval: '✏️',
+  awaiting_voice_config: '🎙️',
   awaiting_audio_approval: '🎵',
-  done:                    '✅',
-  error:                   '❌',
+  audio_approved: '✅',
+  scenes_ready: '🎬',
+  generating_images: '🖼️',
+  images_ready: '✅',
+  done: '✅',
+  error: '❌',
 };
 
 const MODE_ICONS = {
   animated: '🎨',
-  stock:    '📹',
+  stock: '📹',
 };
 
 // ── View routing ──────────────────────────────────────────────────────────
@@ -40,6 +47,7 @@ function showView(name, projectId = null) {
 
   if (name === 'dashboard') loadDashboard();
   if (name === 'detail' && projectId) openDetail(projectId);
+  if (name === 'settings') loadSettingsPage();
 }
 
 document.querySelectorAll('.nav-btn').forEach(btn => {
@@ -71,7 +79,7 @@ async function loadDashboard() {
           <div class="project-card-title">${escHtml(p.title)}</div>
           <div class="project-card-meta">
             <span class="badge badge-${p.status}">${p.status.toUpperCase()}</span>
-            <span>${new Date(p.created_at).toLocaleDateString('es-ES', { day:'2-digit', month:'short', year:'numeric' })}</span>
+            <span>${new Date(p.created_at).toLocaleDateString('es-ES', { day: '2-digit', month: 'short', year: 'numeric' })}</span>
             ${p.chunk_count > 0 ? `<span>${p.chunks_done}/${p.chunk_count} escenas</span>` : ''}
           </div>
           ${p.chunk_count > 0 ? `
@@ -103,32 +111,35 @@ let _outlineOpen = false;
 function toggleOutline() {
   _outlineOpen = !_outlineOpen;
   const content = document.getElementById('outlineContent');
-  const toggle  = document.getElementById('outlineToggle');
+  const toggle = document.getElementById('outlineToggle');
   if (content) content.style.display = _outlineOpen ? '' : 'none';
-  if (toggle)  toggle.textContent = _outlineOpen ? '▲' : '▼';
+  if (toggle) toggle.textContent = _outlineOpen ? '▲' : '▼';
 }
 
 // ── Detail view ───────────────────────────────────────────────────────────
 async function openDetail(projectId) {
   currentProjectId = projectId;
-  _outlineOpen      = false;
-  _selectedVoiceId   = '';
+  _outlineOpen = false;
+  _selectedVoiceId = '';
   _selectedVoiceName = '';
-  _allVoices         = [];
+  _allVoices = [];
+
+  // Pre-load settings so the API key warning is accurate when voice config shows
+  await _fetchSettings();
 
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.getElementById('view-detail').classList.add('active');
 
   // Reset all sections
-  document.getElementById('progressCard').style.display            = 'none';
-  document.getElementById('outlineSection').style.display          = 'none';
-  document.getElementById('scriptSection').style.display           = 'none';
-  document.getElementById('voiceConfigSection').style.display      = 'none';
+  document.getElementById('progressCard').style.display = 'none';
+  document.getElementById('outlineSection').style.display = 'none';
+  document.getElementById('scriptSection').style.display = 'none';
+  document.getElementById('voiceConfigSection').style.display = 'none';
   document.getElementById('voiceoverApprovalSection').style.display = 'none';
-  document.getElementById('chunksSection').style.display           = 'none';
-  document.getElementById('videoPreviewContainer').style.display   = 'none';
-  document.getElementById('chunkGrid').innerHTML   = '';
-  document.getElementById('chunksList').innerHTML  = '';
+  document.getElementById('chunksSection').style.display = 'none';
+  document.getElementById('videoPreviewContainer').style.display = 'none';
+  document.getElementById('chunkGrid').innerHTML = '';
+  document.getElementById('chunksList').innerHTML = '';
   document.getElementById('logsContainer').innerHTML = '<div class="log-placeholder">Cargando logs\u2026</div>';
 
   await refreshDetail(projectId);
@@ -139,28 +150,28 @@ async function openDetail(projectId) {
 
 async function refreshDetail(projectId) {
   try {
-    const p      = await apiFetch(`/api/projects/${projectId}`);
+    const p = await apiFetch(`/api/projects/${projectId}`);
     const chunks = p.chunks || [];
 
     // ── Header ───────────────────────────────────────────────────────────
     document.getElementById('detailTitle').textContent = p.title;
     const badge = document.getElementById('detailBadge');
     badge.textContent = p.status.toUpperCase();
-    badge.className   = `badge badge-${p.status}`;
+    badge.className = `badge badge-${p.status}`;
 
     // ── Progress card (queued / processing / error) ───────────────────────
     const progressCard = document.getElementById('progressCard');
-    const isRunning    = ['queued', 'processing', 'error'].includes(p.status);
+    const isRunning = ['queued', 'processing', 'error'].includes(p.status);
     progressCard.style.display = isRunning ? '' : 'none';
     if (isRunning) {
       const total = chunks.length;
-      const done  = chunks.filter(c => c.status === 'done').length;
-      const pct   = total > 0 ? Math.round((done / total) * 100) : 0;
-      document.getElementById('progressBar').style.width  = `${pct}%`;
-      document.getElementById('progressPct').textContent  = `${pct}%`;
+      const done = chunks.filter(c => c.status === 'done').length;
+      const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+      document.getElementById('progressBar').style.width = `${pct}%`;
+      document.getElementById('progressPct').textContent = `${pct}%`;
       document.getElementById('progressLabel').textContent =
-        p.status === 'error'      ? `Error: ${p.error_message || ''}` :
-        p.status === 'processing' ? 'Procesando…' : 'En cola…';
+        p.status === 'error' ? `Error: ${p.error_message || ''}` :
+          p.status === 'processing' ? 'Procesando…' : 'En cola…';
 
       const grid = document.getElementById('chunkGrid');
       grid.innerHTML = '';
@@ -174,26 +185,26 @@ async function refreshDetail(projectId) {
     }
 
     // ── 1. Outline (colapsable) ───────────────────────────────────────────
-    const outlineSection  = document.getElementById('outlineSection');
-    const outlineContent  = document.getElementById('outlineContent');
+    const outlineSection = document.getElementById('outlineSection');
+    const outlineContent = document.getElementById('outlineContent');
     const outlineToggleEl = document.getElementById('outlineToggle');
     if (p.outline) {
-      outlineSection.style.display  = '';
-      outlineContent.textContent    = p.outline;
-      outlineContent.style.display  = _outlineOpen ? '' : 'none';
+      outlineSection.style.display = '';
+      outlineContent.textContent = p.outline;
+      outlineContent.style.display = _outlineOpen ? '' : 'none';
       if (outlineToggleEl) outlineToggleEl.textContent = _outlineOpen ? '▲' : '▼';
     } else {
       outlineSection.style.display = 'none';
     }
 
     // ── 2. Script section (editable ↔ read-only) ──────────────────────────
-    const scriptSection          = document.getElementById('scriptSection');
-    const approvalTextarea       = document.getElementById('approvalTextarea');
-    const scriptContent          = document.getElementById('scriptContent');
+    const scriptSection = document.getElementById('scriptSection');
+    const approvalTextarea = document.getElementById('approvalTextarea');
+    const scriptContent = document.getElementById('scriptContent');
     const scriptApprovalControls = document.getElementById('scriptApprovalControls');
-    const scriptDoneBadge        = document.getElementById('scriptDoneBadge');
-    const chunkConfigBar         = document.getElementById('chunkConfigBar');
-    const scriptHint             = document.getElementById('scriptHint');
+    const scriptDoneBadge = document.getElementById('scriptDoneBadge');
+    const chunkConfigBar = document.getElementById('chunkConfigBar');
+    const scriptHint = document.getElementById('scriptHint');
 
     if (p.script || p.script_final) {
       scriptSection.style.display = '';
@@ -201,11 +212,11 @@ async function refreshDetail(projectId) {
       if (p.status === 'awaiting_approval') {
         // — Editable mode —
         scriptSection.classList.add('script-awaiting');
-        approvalTextarea.style.display       = '';
-        scriptContent.style.display          = 'none';
+        approvalTextarea.style.display = '';
+        scriptContent.style.display = 'none';
         scriptApprovalControls.style.display = '';
-        scriptDoneBadge.style.display        = 'none';
-        chunkConfigBar.style.display         = '';
+        scriptDoneBadge.style.display = 'none';
+        chunkConfigBar.style.display = '';
         scriptHint.textContent = 'Edita el texto si lo deseas, luego aprueba para continuar.';
 
         if (!approvalTextarea.dataset.edited) {
@@ -217,22 +228,22 @@ async function refreshDetail(projectId) {
       } else {
         // — Read-only mode —
         scriptSection.classList.remove('script-awaiting');
-        approvalTextarea.dataset.edited      = '';
-        approvalTextarea.style.display       = 'none';
-        scriptContent.style.display          = '';
-        scriptContent.textContent            = p.script_final || p.script;
+        approvalTextarea.dataset.edited = '';
+        approvalTextarea.style.display = 'none';
+        scriptContent.style.display = '';
+        scriptContent.textContent = p.script_final || p.script;
         scriptApprovalControls.style.display = 'none';
-        scriptDoneBadge.style.display        = '';
-        chunkConfigBar.style.display         = 'none';
-        scriptHint.textContent               = '';
+        scriptDoneBadge.style.display = '';
+        chunkConfigBar.style.display = 'none';
+        scriptHint.textContent = '';
       }
     } else {
       scriptSection.style.display = 'none';
     }
 
     // ── 3. Voice config (awaiting_voice_config only) ──────────────────────
-    const voiceConfigSection  = document.getElementById('voiceConfigSection');
-    const voiceChunksSummary  = document.getElementById('voiceChunksSummary');
+    const voiceConfigSection = document.getElementById('voiceConfigSection');
+    const voiceChunksSummary = document.getElementById('voiceChunksSummary');
     if (p.status === 'awaiting_voice_config') {
       voiceConfigSection.style.display = '';
 
@@ -258,58 +269,162 @@ async function refreshDetail(projectId) {
         try {
           const cfg = JSON.parse(p.tts_config || '{}');
           if (cfg.voice_name) voiceName = cfg.voice_name;
-        } catch (_) {}
+        } catch (_) { }
         _selectedVoiceName = voiceName;
         const display = document.getElementById('selectedVoiceDisplay');
-        const nameEl  = document.getElementById('selectedVoiceName');
-        if (nameEl)  nameEl.textContent    = voiceName;
+        const nameEl = document.getElementById('selectedVoiceName');
+        if (nameEl) nameEl.textContent = voiceName;
         if (display) display.style.display = '';
       }
     } else {
       voiceConfigSection.style.display = 'none';
     }
 
-    // ── 3b. Voiceover Approval (awaiting_audio_approval) ─────────────────
+    // ── 3b. Voiceover section — visible whenever a voiceover exists ───────
+    // Audio player stays visible after approval; buttons hide once approved.
     const approvalSection = document.getElementById('voiceoverApprovalSection');
-    if (p.status === 'awaiting_audio_approval' && approvalSection) {
+    const isAwaitingAudio = p.status === 'awaiting_audio_approval';
+    const isAudioApproved = p.status === 'audio_approved';
+    const isScenesReady = p.status === 'scenes_ready';
+    const isGeneratingImages = p.status === 'generating_images';
+    const isImagesReady = p.status === 'images_ready';
+    const isErrorWithVO = p.status === 'error' && !!p.voiceover_path;
+    const showImagePanel = isScenesReady || isGeneratingImages || isImagesReady;
+    const hasVoiceover = !!p.voiceover_path;
+
+    if (approvalSection && hasVoiceover) {
       approvalSection.style.display = '';
+
+      // Load audio player (set src only once)
       const approvalAudio = document.getElementById('voiceoverApprovalAudio');
-      if (approvalAudio && p.voiceover_path) {
+      if (approvalAudio) {
         const audioUrl = `/api/projects/${p.id}/voiceover/audio`;
         if (approvalAudio.dataset.src !== audioUrl) {
           approvalAudio.src = audioUrl;
           approvalAudio.dataset.src = audioUrl;
         }
       }
+
+      // Show approve/regenerate buttons only when pending approval
+      const approvalActions = approvalSection.querySelector('.voiceover-approval-actions');
+      if (approvalActions) approvalActions.style.display = isAwaitingAudio ? '' : 'none';
+
+      // Show "Continuar con Escenas" button only when audio is approved
+      const continueActions = document.getElementById('voiceoverContinueActions');
+      if (continueActions) continueActions.style.display = isAudioApproved ? '' : 'none';
+
+      // Show "Reintentar" button when errored but voiceover exists
+      const retryActions = document.getElementById('voiceoverRetryActions');
+      if (retryActions) retryActions.style.display = isErrorWithVO ? '' : 'none';
+
+      // Update badge
+      const badge = approvalSection.querySelector('.badge');
+      if (badge) {
+        if (isAwaitingAudio) badge.textContent = '✓ Listo para revisar';
+        else if (isAudioApproved) badge.textContent = '✓ APROBADO';
+        else if (isScenesReady) badge.textContent = '✓ Aprobado';
+        else badge.textContent = '✓ Aprobado';
+      }
     } else if (approvalSection) {
       approvalSection.style.display = 'none';
     }
 
-    // ── 4. Escenas (ocultas hasta que el audio esté aprobado) ─────────────
+    // ── 4. Escenas — visible desde scenes_ready en adelante ──────────────
     const chunksSection = document.getElementById('chunksSection');
-    const hiddenStatuses = ['awaiting_voice_config', 'awaiting_audio_approval'];
+    const hiddenStatuses = ['awaiting_voice_config', 'awaiting_audio_approval', 'audio_approved'];
     if (chunks.length > 0 && !hiddenStatuses.includes(p.status)) {
       chunksSection.style.display = '';
       const countEl = document.getElementById('chunksCount');
-      if (countEl) countEl.textContent = `— ${chunks.length} escenas`;
+      if (countEl) {
+        if (showImagePanel) {
+          const doneImgs = chunks.filter(c => c.image_path).length;
+          countEl.textContent = doneImgs > 0
+            ? `— ${chunks.length} escenas · ${doneImgs} con imagen`
+            : `— ${chunks.length} escenas`;
+        } else {
+          countEl.textContent = `— ${chunks.length} escenas`;
+        }
+      }
 
       const list = document.getElementById('chunksList');
       list.innerHTML = '';
       chunks.forEach(c => {
-        const text    = c.scene_text || '';
+        const text = c.scene_text || '';
         const preview = text.length > 100 ? text.slice(0, 100) + '…' : text;
-        const chars   = text.length.toLocaleString('es-ES');
-        const card    = document.createElement('div');
+        const chars = text.length.toLocaleString('es-ES');
+
+        // Image thumbnail — use the dedicated API endpoint to avoid Windows path issues
+        let imgHtml = '';
+        if (c.image_path) {
+          imgHtml = `<img class="chunk-img-thumb" src="/api/projects/${p.id}/chunk/${c.chunk_number}/image?t=${Date.now()}" alt="Escena ${c.chunk_number}" loading="lazy" />`;
+        }
+
+        // Generated image prompt (collapsible)
+        let promptHtml = '';
+        if (c.image_prompt) {
+          promptHtml = `
+            <div class="chunk-prompt-section">
+              <div class="chunk-prompt-header" onclick="toggleChunkPrompt(${c.chunk_number})">
+                <span>🔎 Prompt generado</span>
+                <span class="chunk-prompt-toggle" id="prompt-toggle-${c.chunk_number}">▼</span>
+              </div>
+              <div class="chunk-prompt-body" id="prompt-body-${c.chunk_number}" style="display:none">${escHtml(c.image_prompt)}</div>
+            </div>`;
+        }
+
+        // Error message
+        let errorHtml = '';
+        if (c.status === 'error' && c.error_message) {
+          errorHtml = `<div class="chunk-error-box">${escHtml(c.error_message)}</div>`;
+        }
+
+        // Retry button (visible when error and in image generation phase)
+        let retryHtml = '';
+        if (c.status === 'error' && showImagePanel) {
+          retryHtml = `<button class="chunk-retry-btn" onclick="retryChunkImage(${c.chunk_number})">🔄 Reintentar imagen</button>`;
+        }
+
+        // Genaipro regenerate button (visible when image_prompt exists and in image panel)
+        let regenHtml = '';
+        if (c.image_prompt && showImagePanel) {
+          regenHtml = `<button class="chunk-regen-btn" onclick="regenerateImageGenaipro(${c.chunk_number})">⚡ Rehacer Imagen (Seedream)</button>`;
+        }
+
+        // Motion Prompt logic (visible if project is in a state where it generated images)
+        let motionHtml = '';
+        if (p.status === 'images_ready' || p.status === 'done' || p.status === 'error' || p.status === 'animating' || p.status === 'motion_prompts_ready') {
+          const motionVal = c.motion_prompt || '';
+          motionHtml = `
+            <div class="chunk-motion-section" style="margin-top:10px;">
+              <div style="font-size:12px; font-weight:600; margin-bottom:4px;">🎥 Movimiento:</div>
+              <div style="display:flex; gap:8px;">
+                <textarea id="motion_prompt_${c.chunk_number}" rows="2" style="flex:1; padding:4px; font-size:12px; border:1px solid var(--border-color); border-radius:4px; background:var(--bg-card); color:var(--text-main);">${escHtml(motionVal)}</textarea>
+                <button class="btn btn-ghost btn-sm" onclick="saveMotionPrompt(${c.chunk_number})">💾</button>
+              </div>
+            </div>`;
+        }
+
+        const card = document.createElement('div');
         card.className = 'chunk-card';
         card.innerHTML = `
           <div class="chunk-card-header" onclick="toggleChunkCard(${c.chunk_number})">
-            <span class="chunk-card-num">Chunk #${c.chunk_number}</span>
+            <span class="chunk-card-num">Escena #${c.chunk_number}</span>
+            ${c.image_path ? '<span class="chunk-img-badge">🖼️</span>' : ''}
             <span class="chunk-card-preview">${escHtml(preview)}</span>
             <span class="chunk-card-chars">${chars} chars</span>
             <span class="chunk-card-status ${c.status}">${c.status}</span>
             <span class="chunk-card-toggle" id="toggle-${c.chunk_number}">▼</span>
           </div>
-          <div class="chunk-card-body" id="chunk-body-${c.chunk_number}" style="display:none">${escHtml(text)}</div>
+          <div class="chunk-card-body" id="chunk-body-${c.chunk_number}" style="display:none">
+            ${imgHtml}
+            ${promptHtml}
+            ${motionHtml}
+            ${c.video_path ? `<div style="margin-top:10px"><video src="/api/projects/${p.id}/chunk/${c.chunk_number}/video?t=${Date.now()}" controls style="max-width:100%"></video></div>` : ''}
+            ${errorHtml}
+            ${retryHtml}
+            ${regenHtml}
+            <div class="chunk-card-text">${escHtml(text)}</div>
+          </div>
         `;
         list.appendChild(card);
       });
@@ -317,11 +432,81 @@ async function refreshDetail(projectId) {
       chunksSection.style.display = 'none';
     }
 
+    // ── 4b. Imagen panel — visible en scenes_ready / generating_images / images_ready ──
+    const scenesReadySection = document.getElementById('scenesReadySection');
+    if (scenesReadySection) {
+      scenesReadySection.style.display = showImagePanel ? '' : 'none';
+      if (showImagePanel) {
+        const doneImgs = chunks.filter(c => c.image_path).length;
+        const label = document.getElementById('scenesReadyLabel');
+        const progressCount = document.getElementById('imagesProgressCount');
+        const generateBtn = document.getElementById('generateImagesBtn');
+        const continueBtn = document.getElementById('continueWithVideoBtn');
+        const hint = document.getElementById('scenesReadyHint');
+
+        if (isGeneratingImages) {
+          if (label) label.textContent = `🎨 Generando escena ${doneImgs} de ${chunks.length}…`;
+          if (progressCount) { progressCount.style.display = ''; progressCount.textContent = `${doneImgs} de ${chunks.length} escenas completadas`; }
+          if (generateBtn) { generateBtn.style.display = ''; generateBtn.disabled = true; generateBtn.textContent = '⏳ Generando con Seedream…'; }
+          if (continueBtn) continueBtn.style.display = 'none';
+          if (hint) hint.textContent = 'Replicate Seedream está procesando cada escena. Puedes seguir viendo su progreso en vivo minimizando esta ventana.';
+        } else if (isImagesReady) {
+          const hasErrors = chunks.some(c => c.status === 'error');
+          const doneVideos = chunks.filter(c => c.video_path).length;
+          if (label) label.textContent = hasErrors
+            ? `⚠️ ${doneImgs} de ${chunks.length} escenas generadas (con errores)`
+            : `✅ ${doneImgs} imágenes · ${doneVideos} videos generados`;
+          if (progressCount) { progressCount.style.display = ''; progressCount.textContent = `${doneImgs} imágenes · ${doneVideos} videos de ${chunks.length}`; }
+
+          if (hasErrors) {
+            if (generateBtn) {
+              generateBtn.style.display = '';
+              generateBtn.disabled = false;
+              generateBtn.textContent = '🔄 Reintentar Escenas Fallidas';
+              generateBtn.className = 'btn btn-warning btn-lg';
+            }
+          } else {
+            if (generateBtn) generateBtn.style.display = 'none';
+          }
+
+          if (continueBtn) continueBtn.style.display = 'none';
+          if (hint) hint.textContent = hasErrors
+            ? 'Algunas escenas fallaron. Puedes reintentar las fallidas individualmente.'
+            : '✅ Imágenes y videos listos con Genaipro Veo. Motion prompts generados para ajuste manual.';
+
+          // "Regenerar TODAS" button
+          let regenAllBtn = document.getElementById('regenAllGenaipro');
+          if (!regenAllBtn) {
+            regenAllBtn = document.createElement('button');
+            regenAllBtn.id = 'regenAllGenaipro';
+            regenAllBtn.className = 'btn btn-warning btn-sm';
+            regenAllBtn.style.marginTop = '8px';
+            regenAllBtn.textContent = '⚠️ Regenerar TODAS las imágenes con Genaipro';
+            regenAllBtn.onclick = regenerateAllGenaipro;
+            hint.parentNode.insertBefore(regenAllBtn, hint.nextSibling);
+          }
+          regenAllBtn.style.display = '';
+
+          // Show Meta AI Automation Block (kept for manual animation override)
+          const metaSection = document.getElementById('metaAnimationSection');
+          if (metaSection) metaSection.style.display = 'block';
+        }
+        else {
+          // scenes_ready — ready to generate
+          if (label) label.textContent = `✅ ${chunks.length} escenas listas para generar`;
+          if (progressCount) progressCount.style.display = 'none';
+          if (generateBtn) { generateBtn.style.display = ''; generateBtn.disabled = false; generateBtn.textContent = '🎨 Generar Imágenes + Video (Genaipro)'; }
+          if (continueBtn) continueBtn.style.display = 'none';
+          if (hint) hint.textContent = 'Gemini generará un prompt visual por escena, luego Genaipro Veo creará la imagen y el clip de video (16:9).';
+        }
+      }
+    }
+
     // ── 5. Video final ────────────────────────────────────────────────────
     if (p.final_video_path) {
       const container = document.getElementById('videoPreviewContainer');
-      const video     = document.getElementById('videoPreview');
-      const relPath   = p.final_video_path.replace(/\\/g, '/').split('/projects/').pop();
+      const video = document.getElementById('videoPreview');
+      const relPath = p.final_video_path.replace(/\\/g, '/').split('/projects/').pop();
       video.src = `/media/${relPath}`;
       container.style.display = '';
     } else {
@@ -329,7 +514,7 @@ async function refreshDetail(projectId) {
     }
 
     // ── Stop polling when in stable state ─────────────────────────────────
-    if (['done', 'error', 'awaiting_approval', 'awaiting_voice_config', 'awaiting_audio_approval'].includes(p.status)) {
+    if (['done', 'error', 'awaiting_approval', 'awaiting_voice_config', 'awaiting_audio_approval', 'audio_approved', 'scenes_ready', 'images_ready'].includes(p.status)) {
       stopPolling();
     }
   } catch (e) {
@@ -402,6 +587,116 @@ function stopLogs() {
 
 function stopPolling() {
   if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+}
+
+// ── Settings ───────────────────────────────────────────────────────────────
+
+const _PROVIDER_KEY_MAP = {
+  genaipro: 'genaipro_api_key',
+  elevenlabs: 'genaipro_api_key',  // ElevenLabs uses same Genaipro key (proxy)
+  openai: 'anthropic_api_key', // fallback; adjust if OpenAI key is separate
+};
+
+async function _fetchSettings() {
+  try {
+    const result = await apiFetch('/api/settings/');
+    _settings = result.data || {};
+  } catch (e) {
+    _settings = {};
+  }
+}
+
+async function loadSettingsPage() {
+  await _fetchSettings();
+
+  const masked = '••••••••';
+  const fields = [
+    'anthropic_api_key', 'genaipro_api_key', 'replicate_api_key', 'grok_api_key',
+    'pexels_api_key', 'pixabay_api_key',
+    'default_tts_provider', 'default_tts_voice_id', 'default_tts_model_id',
+    'default_tts_speed', 'default_tts_stability', 'default_tts_similarity', 'default_tts_style',
+    'default_video_mode', 'default_image_interval',
+  ];
+
+  fields.forEach(key => {
+    const el = document.getElementById(`setting_${key}`);
+    if (!el) return;
+    const val = _settings[key] || '';
+    el.value = val;
+    // Update slider display values
+    const valDisplay = document.getElementById(`setting_${key}_val`);
+    if (valDisplay && val) valDisplay.textContent = parseFloat(val).toFixed(2);
+  });
+}
+
+async function saveSetting(key) {
+  const el = document.getElementById(`setting_${key}`);
+  if (!el) return;
+  const value = el.value.trim();
+
+  try {
+    const result = await apiFetch('/api/settings/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: { [key]: value } }),
+    });
+    _settings = result.data || {};
+    // Show the mask placeholder after saving so the user knows it's saved
+    el.value = _settings[key] || '';
+    showToast('✓ Guardado', 'success');
+  } catch (e) {
+    showToast('Error al guardar: ' + e.message, 'error');
+  }
+}
+
+async function triggerMetaLogin() {
+  try {
+    const result = await apiFetch('/api/settings/meta-login', { method: 'POST' });
+    showToast(result.message || 'Se abrió la ventana de Meta AI.', 'info');
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+  }
+}
+
+async function saveVoiceDefaults() {
+  const data = {
+    default_tts_provider: document.getElementById('setting_default_tts_provider')?.value || '',
+    default_tts_voice_id: document.getElementById('setting_default_tts_voice_id')?.value?.trim() || '',
+    default_tts_model_id: document.getElementById('setting_default_tts_model_id')?.value?.trim() || '',
+    default_tts_speed: document.getElementById('setting_default_tts_speed')?.value || '1.0',
+    default_tts_stability: document.getElementById('setting_default_tts_stability')?.value || '0.5',
+    default_tts_similarity: document.getElementById('setting_default_tts_similarity')?.value || '0.75',
+    default_tts_style: document.getElementById('setting_default_tts_style')?.value || '0.0',
+  };
+  try {
+    const result = await apiFetch('/api/settings/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data }),
+    });
+    _settings = result.data || {};
+    showToast('✓ Configuración de voz guardada', 'success');
+  } catch (e) {
+    showToast('Error al guardar: ' + e.message, 'error');
+  }
+}
+
+async function saveVideoDefaults() {
+  const data = {
+    default_video_mode: document.getElementById('setting_default_video_mode')?.value || 'animated',
+    default_image_interval: document.getElementById('setting_default_image_interval')?.value || '5',
+  };
+  try {
+    const result = await apiFetch('/api/settings/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data }),
+    });
+    _settings = result.data || {};
+    showToast('✓ Configuración de video guardada', 'success');
+  } catch (e) {
+    showToast('Error al guardar: ' + e.message, 'error');
+  }
 }
 
 // ── Reference Videos ──────────────────────────────────────────────────────
@@ -524,7 +819,6 @@ async function submitNewVideo(event) {
 
   const payload = {
     title: document.getElementById('title').value.trim(),
-    topic: document.getElementById('topic').value.trim(),
     mode,
     video_type,
     duration,
@@ -566,6 +860,73 @@ function toggleChunkCard(num) {
   if (icon) {
     icon.textContent = open ? '▲' : '▼';
     icon.classList.toggle('open', open);
+  }
+}
+
+function toggleChunkPrompt(num) {
+  const body = document.getElementById(`prompt-body-${num}`);
+  const icon = document.getElementById(`prompt-toggle-${num}`);
+  if (!body) return;
+  const open = body.style.display === 'none';
+  body.style.display = open ? '' : 'none';
+  if (icon) icon.textContent = open ? '▲' : '▼';
+}
+
+async function retryChunkImage(chunkNumber) {
+  if (!currentProjectId) return;
+  const btn = event.target;
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ Reintentando…';
+
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/retry-chunk-image/${chunkNumber}`, { method: 'POST' });
+    showToast(`Reintentando imagen para escena #${chunkNumber}…`, 'info');
+    stopPolling();
+    await refreshDetail(currentProjectId);
+    pollInterval = setInterval(() => refreshDetail(currentProjectId), 3000);
+  } catch (e) {
+    showToast('Error al reintentar: ' + e.message, 'error');
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
+}
+
+async function regenerateImageGenaipro(chunkNumber) {
+  if (!currentProjectId) return;
+  const btn = event.target;
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ Regenerando…';
+
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/scenes/${chunkNumber}/regenerate-genaipro`, { method: 'POST' });
+    showToast(`⚡ Regenerando imagen de escena #${chunkNumber} con Replicate Seedream…`, 'info');
+    stopPolling();
+    await refreshDetail(currentProjectId);
+    pollInterval = setInterval(() => refreshDetail(currentProjectId), 3000);
+  } catch (e) {
+    showToast('Error al regenerar: ' + e.message, 'error');
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
+}
+
+async function regenerateAllGenaipro() {
+  if (!currentProjectId) return;
+  const btn = document.getElementById('regenAllGenaipro');
+  const origText = btn ? btn.textContent : '⚠️ Regenerar TODAS las imágenes (Seedream)';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Iniciando regeneración masiva…'; }
+
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/regenerate-all-genaipro`, { method: 'POST' });
+    showToast('⚡ Regenerando TODAS las imágenes con Replicate Seedream en segundo plano. Revisa los logs.', 'info');
+    stopPolling();
+    await refreshDetail(currentProjectId);
+    pollInterval = setInterval(() => refreshDetail(currentProjectId), 3000);
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = origText; }
   }
 }
 
@@ -722,7 +1083,7 @@ async function apiFetch(url, options = {}) {
   const res = await fetch(url, options);
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
-    try { const d = await res.json(); msg = d.detail || JSON.stringify(d); } catch {}
+    try { const d = await res.json(); msg = d.detail || JSON.stringify(d); } catch { }
     throw new Error(msg);
   }
   if (res.status === 204) return null;
@@ -752,8 +1113,8 @@ function showToast(message, type = 'info', duration = 4000) {
 // ── Voice Config ──────────────────────────────────────────────────────────
 
 // Voice browser state (GenAIPro)
-let _allVoices      = [];
-let _selectedVoiceId   = '';
+let _allVoices = [];
+let _selectedVoiceId = '';
 let _selectedVoiceName = '';
 
 /**
@@ -762,47 +1123,51 @@ let _selectedVoiceName = '';
  */
 const TTS_PROVIDER_FIELDS = {
   genaipro: [
-    { id: 'model_id', label: 'Modelo', type: 'select',
+    {
+      id: 'model_id', label: 'Modelo', type: 'select',
       options: [
         { value: 'eleven_multilingual_v2', label: 'Multilingual v2 (recomendado)' },
-        { value: 'eleven_monolingual_v1',  label: 'Monolingual v1 (inglés)' },
-        { value: 'eleven_turbo_v2',        label: 'Turbo v2 (rápido)' },
+        { value: 'eleven_monolingual_v1', label: 'Monolingual v1 (inglés)' },
+        { value: 'eleven_turbo_v2', label: 'Turbo v2 (rápido)' },
       ],
       default: 'eleven_multilingual_v2',
     },
-    { id: 'speed',      label: 'Velocidad',   type: 'range', min: 0.7, max: 1.2,  step: 0.05, default: 1.0  },
-    { id: 'stability',  label: 'Estabilidad', type: 'range', min: 0,   max: 1,    step: 0.05, default: 0.5  },
-    { id: 'similarity', label: 'Similarity',  type: 'range', min: 0,   max: 1,    step: 0.05, default: 0.75 },
-    { id: 'style',      label: 'Style',       type: 'range', min: 0,   max: 1,    step: 0.05, default: 0.0  },
+    { id: 'speed', label: 'Velocidad', type: 'range', min: 0.7, max: 1.2, step: 0.05, default: 1.0 },
+    { id: 'stability', label: 'Estabilidad', type: 'range', min: 0, max: 1, step: 0.05, default: 0.5 },
+    { id: 'similarity', label: 'Similarity', type: 'range', min: 0, max: 1, step: 0.05, default: 0.75 },
+    { id: 'style', label: 'Style', type: 'range', min: 0, max: 1, step: 0.05, default: 0.0 },
   ],
   elevenlabs: [
-    { id: 'voice_id',   label: 'Voice ID', type: 'text', placeholder: 'Ej: EXAVITQu4vr4xnSDxMaL', default: '', fullWidth: true },
-    { id: 'model_id',   label: 'Modelo', type: 'select',
+    { id: 'voice_id', label: 'Voice ID', type: 'text', placeholder: 'Ej: EXAVITQu4vr4xnSDxMaL', default: '', fullWidth: true },
+    {
+      id: 'model_id', label: 'Modelo', type: 'select',
       options: [
         { value: 'eleven_multilingual_v2', label: 'Multilingual v2 (recomendado)' },
-        { value: 'eleven_monolingual_v1',  label: 'Monolingual v1 (inglés)' },
-        { value: 'eleven_turbo_v2',        label: 'Turbo v2 (rápido)' },
+        { value: 'eleven_monolingual_v1', label: 'Monolingual v1 (inglés)' },
+        { value: 'eleven_turbo_v2', label: 'Turbo v2 (rápido)' },
       ],
       default: 'eleven_multilingual_v2',
     },
-    { id: 'stability',  label: 'Estabilidad', type: 'range', min: 0, max: 1, step: 0.05, default: 0.5 },
+    { id: 'stability', label: 'Estabilidad', type: 'range', min: 0, max: 1, step: 0.05, default: 0.5 },
     { id: 'similarity', label: 'Similarity Boost', type: 'range', min: 0, max: 1, step: 0.05, default: 0.75 },
   ],
   openai: [
-    { id: 'voice', label: 'Voz', type: 'select',
+    {
+      id: 'voice', label: 'Voz', type: 'select',
       options: [
-        { value: 'alloy',   label: 'Alloy (neutral)' },
-        { value: 'echo',    label: 'Echo (masculino)' },
-        { value: 'fable',   label: 'Fable (expresivo)' },
-        { value: 'onyx',    label: 'Onyx (profundo)' },
-        { value: 'nova',    label: 'Nova (femenino)' },
+        { value: 'alloy', label: 'Alloy (neutral)' },
+        { value: 'echo', label: 'Echo (masculino)' },
+        { value: 'fable', label: 'Fable (expresivo)' },
+        { value: 'onyx', label: 'Onyx (profundo)' },
+        { value: 'nova', label: 'Nova (femenino)' },
         { value: 'shimmer', label: 'Shimmer (suave)' },
       ],
       default: 'alloy',
     },
-    { id: 'model', label: 'Modelo', type: 'select',
+    {
+      id: 'model', label: 'Modelo', type: 'select',
       options: [
-        { value: 'tts-1',    label: 'TTS-1 (rápido)' },
+        { value: 'tts-1', label: 'TTS-1 (rápido)' },
         { value: 'tts-1-hd', label: 'TTS-1-HD (alta calidad)' },
       ],
       default: 'tts-1',
@@ -813,6 +1178,14 @@ const TTS_PROVIDER_FIELDS = {
 
 function onProviderChange() {
   const provider = document.getElementById('ttsProvider')?.value || 'genaipro';
+
+  // Show or hide the "no API key" warning
+  const warning = document.getElementById('voiceNoKeyWarning');
+  if (warning) {
+    const keyName = _PROVIDER_KEY_MAP[provider] || `${provider}_api_key`;
+    const hasKey = !!_settings[keyName];
+    warning.style.display = hasKey ? 'none' : '';
+  }
 
   // Show voice list browser only for GenAIPro
   const voiceListSection = document.getElementById('voiceListSection');
@@ -895,8 +1268,11 @@ function onProviderChange() {
 // ── Voice browser (GenAIPro) ───────────────────────────────────────────────
 
 async function loadVoices() {
-  const apiKey = document.getElementById('ttsApiKey')?.value?.trim();
-  if (!apiKey) { showToast('Ingresa tu API key primero.', 'error'); return; }
+  const apiKey = await _getApiKeyForProvider('genaipro');
+  if (!apiKey) {
+    showToast('⚠️ Configura tu API key de Genaipro en Settings primero.', 'error');
+    return;
+  }
 
   const btn = document.querySelector('#voiceListSection .btn-ghost');
   const origText = btn ? btn.textContent : '🔃 Cargar voces';
@@ -922,11 +1298,11 @@ function filterVoices() {
   const q = (document.getElementById('voiceSearch')?.value || '').toLowerCase();
   const filtered = q
     ? _allVoices.filter(v =>
-        (v.name     || '').toLowerCase().includes(q) ||
-        (v.gender   || '').toLowerCase().includes(q) ||
-        (v.accent   || '').toLowerCase().includes(q) ||
-        (v.language || '').toLowerCase().includes(q)
-      )
+      (v.name || '').toLowerCase().includes(q) ||
+      (v.gender || '').toLowerCase().includes(q) ||
+      (v.accent || '').toLowerCase().includes(q) ||
+      (v.language || '').toLowerCase().includes(q)
+    )
     : _allVoices;
   renderVoiceList(filtered);
 }
@@ -955,12 +1331,12 @@ function renderVoiceList(voices) {
 }
 
 function selectVoice(voice) {
-  _selectedVoiceId   = voice.voice_id || voice.id || '';
+  _selectedVoiceId = voice.voice_id || voice.id || '';
   _selectedVoiceName = voice.name || _selectedVoiceId;
 
   const display = document.getElementById('selectedVoiceDisplay');
-  const nameEl  = document.getElementById('selectedVoiceName');
-  if (nameEl)  nameEl.textContent   = _selectedVoiceName;
+  const nameEl = document.getElementById('selectedVoiceName');
+  if (nameEl) nameEl.textContent = _selectedVoiceName;
   if (display) display.style.display = '';
 
   renderVoiceList(_allVoices); // re-render to update selected highlight
@@ -968,9 +1344,21 @@ function selectVoice(voice) {
 
 // ── Voice config collection ───────────────────────────────────────────────
 
+/** Fetch the real (unmasked) API key for a TTS provider from the backend. */
+async function _getApiKeyForProvider(provider) {
+  const keyName = _PROVIDER_KEY_MAP[provider] || `${provider}_api_key`;
+  try {
+    const result = await apiFetch(`/api/settings/raw/${keyName}`);
+    return result.value || '';
+  } catch (e) {
+    return '';
+  }
+}
+
 function _collectVoiceConfig() {
   const provider = document.getElementById('ttsProvider')?.value || 'genaipro';
-  const api_key  = document.getElementById('ttsApiKey')?.value?.trim() || '';
+  // api_key is resolved asynchronously by callers via _getApiKeyForProvider()
+  const api_key = '';
 
   const fields = TTS_PROVIDER_FIELDS[provider] || [];
   const extraConfig = {};
@@ -999,23 +1387,26 @@ function _collectVoiceConfig() {
 
   return {
     tts_provider: provider,
-    tts_api_key:  api_key,
+    tts_api_key: api_key,
     tts_voice_id: voice_id || null,
-    tts_config:   JSON.stringify(extraConfig),
+    tts_config: JSON.stringify(extraConfig),
   };
 }
 
 async function testVoice() {
   if (!currentProjectId) return;
   const cfg = _collectVoiceConfig();
-  if (!cfg.tts_api_key) {
-    showToast('Ingresa tu API key primero.', 'error');
-    return;
-  }
   if (!cfg.tts_voice_id) {
     showToast('Selecciona una voz primero.', 'error');
     return;
   }
+
+  const apiKey = await _getApiKeyForProvider(cfg.tts_provider);
+  if (!apiKey) {
+    showToast('⚠️ Configura tu API key en Settings primero.', 'error');
+    return;
+  }
+  cfg.tts_api_key = apiKey;
 
   const btn = document.querySelector('.voice-config-actions-top .btn-ghost');
   const origText = btn ? btn.textContent : '🔊 Probar Voz';
@@ -1034,14 +1425,14 @@ async function testVoice() {
     }
 
     const blob = await resp.blob();
-    const url  = URL.createObjectURL(blob);
+    const url = URL.createObjectURL(blob);
 
     const container = document.getElementById('testAudioContainer');
-    const audio     = document.getElementById('testAudio');
+    const audio = document.getElementById('testAudio');
     if (audio) {
       if (audio.src && audio.src.startsWith('blob:')) URL.revokeObjectURL(audio.src);
       audio.src = url;
-      audio.play().catch(() => {});
+      audio.play().catch(() => { });
     }
     if (container) container.style.display = '';
     showToast('Vista previa generada ✓', 'success');
@@ -1055,14 +1446,17 @@ async function testVoice() {
 async function generateVoiceover() {
   if (!currentProjectId) return;
   const cfg = _collectVoiceConfig();
-  if (!cfg.tts_api_key) {
-    showToast('Ingresa tu API key primero.', 'error');
-    return;
-  }
   if (!cfg.tts_voice_id) {
     showToast('Selecciona una voz primero.', 'error');
     return;
   }
+
+  const apiKey = await _getApiKeyForProvider(cfg.tts_provider);
+  if (!apiKey) {
+    showToast('⚠️ Configura tu API key en Settings primero.', 'error');
+    return;
+  }
+  cfg.tts_api_key = apiKey;
 
   const btn = document.querySelector('.voice-config-actions-top .btn-primary');
   const origText = btn ? btn.textContent : '🎙️ Generar Voiceover Completo';
@@ -1090,21 +1484,113 @@ async function generateVoiceover() {
 
 async function approveAudio() {
   if (!currentProjectId) return;
-  if (!confirm('¿Aprobar el voiceover y continuar con la generación de video?')) return;
+  if (!confirm('¿Aprobar el voiceover? Después podrás continuar con la generación de escenas.')) return;
 
   const btn = document.querySelector('#voiceoverApprovalSection .btn-success');
-  const origText = btn ? btn.textContent : '✅ Aprobar Audio y Continuar';
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Iniciando…'; }
+  const origText = btn ? btn.textContent : '✅ Aprobar Audio';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Aprobando…'; }
 
   try {
     await apiFetch(`/api/projects/${currentProjectId}/approve-audio`, { method: 'POST' });
-    showToast('Audio aprobado. Iniciando generación de video…', 'success');
+    showToast('¡Audio aprobado! Haz clic en "Continuar con Escenas" para procesar el video.', 'success');
+    await refreshDetail(currentProjectId);
+  } catch (e) {
+    showToast('Error al aprobar: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = origText; }
+  }
+}
+
+async function continueWithScenes() {
+  if (!currentProjectId) return;
+  if (!confirm('¿Continuar con la generación de escenas? Se dividirá el SRT en escenas de 5 segundos y se iniciará la generación de video.')) return;
+
+  const btn = document.getElementById('voiceoverContinueActions')?.querySelector('button');
+  const origText = btn ? btn.textContent : '▶️ Continuar con Escenas';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Creando escenas…'; }
+
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/create-scenes-from-srt`, { method: 'POST' });
+    showToast('Escenas creadas. Iniciando generación de video…', 'success');
     stopPolling();
     await refreshDetail(currentProjectId);
     pollInterval = setInterval(() => refreshDetail(currentProjectId), 4000);
   } catch (e) {
-    showToast('Error al aprobar: ' + e.message, 'error');
+    showToast('Error: ' + e.message, 'error');
     if (btn) { btn.disabled = false; btn.textContent = origText; }
+  }
+}
+
+async function resetToAudioApproved() {
+  if (!currentProjectId) return;
+  if (!confirm('¿Reintentar desde audio aprobado? Se limpiarán los chunks con error para que puedas continuar con las escenas.')) return;
+
+  const btn = document.getElementById('voiceoverRetryActions')?.querySelector('button');
+  const origText = btn ? btn.textContent : '🔄 Reintentar desde Audio Aprobado';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Reseteando…'; }
+
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/reset-to-audio-approved`, { method: 'POST' });
+    showToast('Proyecto reseteado. Ahora haz clic en "Continuar con Escenas".', 'success');
+    await refreshDetail(currentProjectId);
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = origText; }
+  }
+}
+
+async function generateImages() {
+  if (!currentProjectId) return;
+
+  const btn = document.getElementById('generateImagesBtn');
+  const origText = btn ? btn.textContent : '🎨 Generar Imágenes + Video (Genaipro)';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Iniciando Genaipro…'; }
+
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/generate-images`, { method: 'POST' });
+    showToast('🎨 Genaipro Veo iniciado — generando imagen + video por escena. Revisa los logs para el progreso.', 'info');
+    stopPolling();
+    await refreshDetail(currentProjectId);
+    pollInterval = setInterval(() => refreshDetail(currentProjectId), 3000);
+  } catch (e) {
+    showToast('Error al generar imágenes: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = origText; }
+  }
+}
+
+async function continueWithVideo() {
+  showToast('Próximamente — integración con NCA para renderizado de video.', 'info');
+}
+
+async function startMetaAnimation() {
+  if (!currentProjectId) return;
+  const btn = document.getElementById('generateMetaAnimationBtn');
+  const origText = btn ? btn.textContent : '🎬 Generar Animaciones (Meta AI)';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Iniciando Automación (Meta AI)...'; }
+
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/start-animation`, { method: 'POST' });
+    showToast('Animación masiva iniciada (Max: 3 pestañas). Mantén abierta la terminal de Python.', 'success');
+    stopPolling();
+    await refreshDetail(currentProjectId);
+    pollInterval = setInterval(() => refreshDetail(currentProjectId), 5000);
+  } catch (e) {
+    showToast('Error al iniciar animación: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = origText; }
+  }
+}
+
+async function saveMotionPrompt(chunk_number) {
+  if (!currentProjectId) return;
+  const val = document.getElementById(`motion_prompt_${chunk_number}`).value;
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/chunk/${chunk_number}/motion-prompt`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ motion_prompt: val })
+    });
+    showToast(`Prompt de movimiento #${chunk_number} guardado`, 'success');
+  } catch (e) {
+    showToast('Error al guardar: ' + e.message, 'error');
   }
 }
 
@@ -1122,4 +1608,5 @@ async function regenerateVoiceover() {
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────
+_fetchSettings();
 loadDashboard();
