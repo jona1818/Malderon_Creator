@@ -57,6 +57,27 @@ def init_db():
             except Exception:
                 pass  # column already exists
 
+        # Migrate: reference images (character + style) for kontext model
+        for col_def in (
+            "ALTER TABLE projects ADD COLUMN reference_character_path VARCHAR(512)",
+            "ALTER TABLE projects ADD COLUMN reference_style_path VARCHAR(512)",
+        ):
+            try:
+                conn.execute(__import__("sqlalchemy").text(col_def))
+                conn.commit()
+            except Exception:
+                pass  # column already exists
+
+        # Copy old reference_image_path → reference_character_path if it exists
+        try:
+            conn.execute(__import__("sqlalchemy").text(
+                "UPDATE projects SET reference_character_path = reference_image_path "
+                "WHERE reference_image_path IS NOT NULL AND reference_character_path IS NULL"
+            ))
+            conn.commit()
+        except Exception:
+            pass
+
         # Migrate: Chunk tables
         for col_def in (
             "ALTER TABLE chunks ADD COLUMN motion_prompt TEXT",

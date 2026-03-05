@@ -3,7 +3,7 @@
 When Meta AI fails 2× in a row this service:
   1. Uses Grok Vision (grok-2-vision-1212) to analyze the still image and
      produce an *enhanced* animation prompt.
-  2. Sends that improved prompt to Replicate LTX Video to generate the clip.
+  2. Sends that improved prompt to GenAIPro Veo to generate the clip.
 
 API docs: https://docs.x.ai/docs
 Base URL : https://api.x.ai/v1  (OpenAI-compatible)
@@ -31,7 +31,7 @@ def enhance_motion_prompt(image_path: str, motion_prompt: str, api_key: str) -> 
     """
     Ask Grok Vision to analyze the image and refine the animation instruction.
 
-    Returns a single-sentence improved prompt suitable for Replicate LTX Video.
+    Returns a single-sentence improved prompt suitable for video generation.
     Falls back to the original motion_prompt if the API call fails.
     """
     img = Path(image_path)
@@ -76,11 +76,11 @@ def animate_with_grok_fallback(
     motion_prompt: str,
     output_path: str,
     grok_api_key: str,
-    replicate_api_key: str = "",
+    genaipro_api_key: str = "",
 ) -> str:
     """
     Plan-B animation pipeline:
-      Grok Vision (prompt enhancement) → Replicate LTX Video (actual generation)
+      Grok Vision (prompt enhancement) → GenAIPro Veo (actual generation)
 
     Parameters
     ----------
@@ -88,7 +88,7 @@ def animate_with_grok_fallback(
     motion_prompt    : original motion prompt from the UI / motion_service
     output_path      : where to save the output MP4
     grok_api_key     : xAI Grok API key
-    replicate_api_key: Replicate token (falls back to settings if empty)
+    genaipro_api_key : GenAIPro API key for video generation
 
     Returns output_path on success. Raises RuntimeError on failure.
     """
@@ -100,13 +100,13 @@ def animate_with_grok_fallback(
         print(f"[Grok] Vision enhancement failed ({exc}); using original prompt.")
         enhanced = motion_prompt
 
-    # Step 2 — generate video with Replicate LTX Video
-    from .. import replicate_service
+    # Step 2 — generate video with GenAIPro Veo
+    from .. import genaipro_media_service
 
-    replicate_service.animate_image(
+    genaipro_media_service.animate_image(
         image_path=Path(image_path),
         output_path=Path(output_path),
+        api_key=genaipro_api_key,
         prompt=enhanced,
-        api_key=replicate_api_key,
     )
     return output_path

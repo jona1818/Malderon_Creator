@@ -2,7 +2,7 @@
 Pipeline orchestrator.
 
 Modes:
-  - animated: Claude → TTS → ImagePrompt → SeedDream → LTX → NCA
+  - animated: Claude → TTS → ImagePrompt → Google Imagen 4 Fast → Animation → NCA
   - stock:    Claude → TTS → Keywords → Pexels/Pixabay → NCA
 
 Chunk processing runs in a thread pool. Progress is persisted to SQLite
@@ -27,17 +27,16 @@ from ..database import SessionLocal
 from ..models import Project, Chunk, Worker, ProjectStatus, ChunkStatus, VideoMode
 
 from .claude_service import (
-    generate_script,
-    generate_outline,
-    generate_script_from_outline,
+    generate_script_full,
     clean_script,
     generate_image_prompt,
     generate_search_keywords,
     DURATION_SCENES,
 )
 from .openai_service import generate_tts
-from . import replicate_service, pexels_service, pixabay_service, nca_service, google_service, genaipro_media_service
-from .video import motion_service, meta_bot, grok_service
+from . import pexels_service, pixabay_service, nca_service, google_service, wavespeed_service
+from .image import generate_image as _dispatch_generate_image
+from .video import motion_service, pollinations_video_service
 
 MAX_WORKERS = settings.max_workers
 
@@ -49,6 +48,37 @@ def _get_db_setting(db, key: str) -> str:
     from ..models import AppSetting
     row = db.query(AppSetting).filter(AppSetting.key == key).first()
     return (row.value or "") if row else ""
+
+
+def _get_pollinations_api_key(db) -> str:
+    """Return the Pollinations API key (DB setting → .env). Empty string is OK (free tier)."""
+    return _get_db_setting(db, "pollinations_api_key") or settings.pollinations_api_key or ""
+
+
+def _get_wavespeed_api_key(db) -> str:
+    """Return the WaveSpeed API key (DB setting → .env)."""
+    return _get_db_setting(db, "wavespeed_api_key") or settings.wavespeed_api_key or ""
+
+
+def _get_image_provider(db) -> str:
+    """Return the image provider name (DB setting → .env → default 'wavespeed')."""
+    return _get_db_setting(db, "image_provider") or settings.image_provider or "wavespeed"
+
+
+def _get_reference_character(db, project) -> str | None:
+    """Return the character reference image path, or None."""
+    ref = getattr(project, "reference_character_path", None) or ""
+    if ref and Path(ref).exists():
+        return ref
+    return None
+
+
+def _get_reference_style(db, project) -> str | None:
+    """Return the style reference image path, or None."""
+    ref = getattr(project, "reference_style_path", None) or ""
+    if ref and Path(ref).exists():
+        return ref
+    return None
 
 
 # ── Logging helper ────────────────────────────────────────────────────────────
@@ -194,8 +224,8 @@ def _run_pipeline_phase1(project_id: int):
         _update_project(db, project, status=ProjectStatus.processing)
         _log(db, project_id, f"Pipeline started for '{project.title}'", stage="init")
 
-        # ── 1. Generate outline ────────────────────────────────────────────
-        _log(db, project_id, "Generating outline with Claude…", stage="outline")
+        # ── 1. Generate full script (outline is generated internally) ──────
+        _log(db, project_id, "Generating full script with Claude…", stage="script")
         import json as _json
         transcripts = []
         if project.reference_transcripts:
@@ -203,18 +233,19 @@ def _run_pipeline_phase1(project_id: int):
                 transcripts = _json.loads(project.reference_transcripts)
             except Exception:
                 transcripts = []
-        outline = generate_outline(project.title, transcripts or None)
-        _update_project(db, project, outline=outline)
-        _log(db, project_id, "Outline generated successfully", stage="outline")
-
-        # ── 2. Generate script from outline ────────────────────────────────
-        _log(db, project_id, "Generating script from outline…", stage="script")
-        script_text = generate_script_from_outline(outline, project.duration or "6-8")
+                
+        script_text = generate_script_full(
+            title=project.title,
+            transcripts=transcripts or None,
+            video_type=project.video_type or "top10",
+            duration=project.duration or "6-8"
+        )
+        
         script_text = clean_script(script_text)
         _update_project(db, project, script=script_text)
         _log(db, project_id, "Script generated. Awaiting manual approval.", stage="script")
 
-        # ── 3. Pause — wait for user approval ─────────────────────────────
+        # ── 2. Pause — wait for user approval ─────────────────────────────
         _update_project(db, project, status=ProjectStatus.awaiting_approval)
         _log(db, project_id, "Status set to awaiting_approval. Review and approve the script.", stage="approval")
 
@@ -244,18 +275,28 @@ def _regenerate_script_thread(project_id: int):
         if not project:
             return
 
-        _update_project(db, project, status=ProjectStatus.processing)
-        _log(db, project_id, "Regenerating script from existing outline…", stage="script")
+        # ── Regenerate full script ──
+        _log(db, project_id, "Regenerating full script with Claude…", stage="script")
+        
+        import json as _json
+        transcripts = []
+        if project.reference_transcripts:
+            try:
+                transcripts = _json.loads(project.reference_transcripts)
+            except Exception:
+                transcripts = []
 
-        outline = project.outline
-        if not outline:
-            raise RuntimeError("No outline found. Cannot regenerate script.")
-
-        script_text = generate_script_from_outline(outline, project.duration or "6-8")
+        script_text = generate_script_full(
+            title=project.title,
+            transcripts=transcripts or None,
+            video_type=project.video_type or "top10",
+            duration=project.duration or "6-8"
+        )
         script_text = clean_script(script_text)
+        
         _update_project(db, project, script=script_text, script_approved=False, script_final=None)
         _log(db, project_id, "Script regenerated. Awaiting manual approval.", stage="script")
-
+        
         _update_project(db, project, status=ProjectStatus.awaiting_approval)
         _log(db, project_id, "Status set to awaiting_approval.", stage="approval")
 
@@ -444,7 +485,7 @@ def _resolve_srt(
     Priority:
     1. chunk.srt_path already in DB and file exists
     2. Per-chunk SRT on disk: vo_dir/audio-chunk-N.srt
-    3. Global SRT from GenAIPro: vo_dir/subtitles.srt
+    3. Global SRT from TTS provider: vo_dir/subtitles.srt
     4. Synthetic SRT generated from the chunk text
     """
     # 1. Already resolved in DB
@@ -452,14 +493,14 @@ def _resolve_srt(
         _log(db, project_id, f"[Chunk {n}] Usando SRT existente (DB).", stage=f"chunk_{n}_srt")
         return Path(chunk.srt_path)
 
-    # 2. Per-chunk SRT file on disk (GenAIPro saves alongside the MP3)
+    # 2. Per-chunk SRT file on disk (TTS provider saves alongside the MP3)
     per_chunk_srt = vo_dir / f"audio-chunk-{n}.srt"
     if per_chunk_srt.exists():
-        _log(db, project_id, f"[Chunk {n}] Usando SRT por chunk de GenAIPro.", stage=f"chunk_{n}_srt")
+        _log(db, project_id, f"[Chunk {n}] Usando SRT por chunk de TTS provider.", stage=f"chunk_{n}_srt")
         _update_chunk(db, chunk, srt_path=str(per_chunk_srt))
         return per_chunk_srt
 
-    # 3. Global subtitles.srt from GenAIPro
+    # 3. Global subtitles.srt from TTS provider
     global_srt = vo_dir / "subtitles.srt"
     if global_srt.exists():
         _log(db, project_id, f"[Chunk {n}] Usando subtitles.srt global.", stage=f"chunk_{n}_srt")
@@ -716,7 +757,7 @@ def start_create_scenes_from_srt(project_id: int) -> None:
     t.start()
 
 
-# ── Media generation (Genaipro Veo — image + video per scene) ─────────────────
+# ── Media generation (Pollinations — image + video per scene) ─────────────────
 
 def _generate_media_for_chunk(
     project_id: int,
@@ -725,16 +766,14 @@ def _generate_media_for_chunk(
     reference_character: str | None,
     api_key: str,
 ) -> None:
-    """Generate image then video for one scene chunk using Genaipro Veo.
+    """Generate image for one scene chunk using Pollinations.
 
     Steps
     -----
     1. Use pre-generated Gemini image prompt, or fall back to Claude.
-    2. Call Genaipro /veo/create-image  → save image_N.jpg.
+    2. Call Pollinations image API → save image_N.jpg.
     3. Get or generate a motion prompt (motion_service / fallback).
-    4. Call Genaipro /veo/frames-to-video  → save video_N.mp4.
-       If video generation fails the chunk is still marked done with the
-       static image so NCA can render it as a still.
+       Video animation is handled separately in Phase 4.
     """
     db = SessionLocal()
     try:
@@ -750,9 +789,9 @@ def _generate_media_for_chunk(
         img_prompt = (chunk.image_prompt or "").strip()
 
         if img_prompt:
-            _log(db, project_id, f"[Genaipro {n}] ✓ Prompt pre-generado listo.", stage=f"media_{n}")
+            _log(db, project_id, f"[Pollinations {n}] ✓ Prompt pre-generado listo.", stage=f"media_{n}")
         else:
-            _log(db, project_id, f"[Genaipro {n}] Generando prompt con Claude…", stage=f"media_{n}")
+            _log(db, project_id, f"[Pollinations {n}] Generando prompt con Claude…", stage=f"media_{n}")
             generated = None
             for _attempt in range(3):
                 try:
@@ -769,22 +808,32 @@ def _generate_media_for_chunk(
                 # Last-resort fallback: use the narration text itself
                 img_prompt = narration.strip()[:800]
                 _log(db, project_id,
-                     f"[Genaipro {n}] ⚠️ Claude no generó prompt — usando narración como fallback.",
+                     f"[Pollinations {n}] ⚠️ Claude no generó prompt — usando narración como fallback.",
                      stage=f"media_{n}", level="warning")
             if not img_prompt:
                 raise RuntimeError(f"Escena {n} no tiene texto — no se puede generar imagen.")
             _update_chunk(db, chunk, image_prompt=img_prompt)
 
-        print(f"DEBUG [Genaipro escena {n}] Enviando prompt a Genaipro: {img_prompt[:150]}")
+        print(f"DEBUG [imagen_{n}] Prompt: {img_prompt[:150]}")
 
-        # ── Step 2: image generation ──────────────────────────────────────────
-        _log(db, project_id, f"[GenAIPro {n}] 🎨 Creando imagen…", stage=f"media_{n}_img")
+        # ── Step 2: image generation ─────────────────────────────────────────
+        img_provider = _get_image_provider(db)
+        _log(db, project_id, f"[imagen_{n}] Generando con {img_provider.capitalize()}…", stage=f"media_{n}_img")
         img_path = c_dir / "images" / f"image_{n}.jpg"
         img_path.parent.mkdir(parents=True, exist_ok=True)
 
-        genaipro_media_service.generate_image(img_prompt, img_path, api_key)
+        poll_key = _get_pollinations_api_key(db)
+        ws_key = _get_wavespeed_api_key(db)
+        project_obj = db.query(Project).filter(Project.id == project_id).first()
+        ref_char = _get_reference_character(db, project_obj) if project_obj else None
+        ref_style = _get_reference_style(db, project_obj) if project_obj else None
+        _dispatch_generate_image(
+            img_prompt, img_path,
+            provider=img_provider, api_key=poll_key, wavespeed_api_key=ws_key,
+            reference_character_path=ref_char, reference_style_path=ref_style,
+        )
         _update_chunk(db, chunk, image_path=str(img_path))
-        _log(db, project_id, f"[GenAIPro {n}] ✓ Imagen guardada ({img_path.stat().st_size // 1024} KB).", stage=f"media_{n}_img_done")
+        _log(db, project_id, f"[imagen_{n}] ✅ Guardada: image_{n}.jpg ({img_path.stat().st_size // 1024} KB)", stage=f"media_{n}_img_done")
 
         # ── Step 3: motion prompt ─────────────────────────────────────────────
         if chunk.motion_prompt:
@@ -796,12 +845,12 @@ def _generate_media_for_chunk(
             except Exception as mp_exc:
                 motion = "Slow cinematic zoom in, subtle camera movement"
                 _log(db, project_id,
-                     f"[GenAIPro {n}] ⚠️ Motion prompt falló ({mp_exc}), usando fallback.",
+                     f"[Pollinations {n}] ⚠️ Motion prompt falló ({mp_exc}), usando fallback.",
                      stage=f"media_{n}", level="warning")
                 _update_chunk(db, chunk, motion_prompt=motion)
         
         # We stop here for the image phase.
-        # Phase 4 (Meta AI Engine) handles video animation separately.
+        # Phase 4 (Pollinations grok-video) handles video animation separately.
         _update_chunk(db, chunk, status=ChunkStatus.done)
 
     except Exception as exc:
@@ -810,34 +859,26 @@ def _generate_media_for_chunk(
         chunk = db.query(Chunk).filter(Chunk.id == chunk_id).first()
         if chunk:
             _update_chunk(db, chunk, status=ChunkStatus.error, error_message=str(exc))
-        _log(db, project_id, f"[Genaipro chunk {chunk_id}] Error: {exc}", stage="media_error", level="error")
+        _log(db, project_id, f"[Pollinations chunk {chunk_id}] Error: {exc}", stage="media_error", level="error")
         raise
     finally:
         db.close()
 
 
 def _run_generate_images(project_id: int) -> None:
-    """Generate image + video for every scene chunk using Genaipro Veo (sequential)."""
+    """Generate image + motion prompt for every scene chunk using Pollinations."""
     db = SessionLocal()
     try:
         project = db.query(Project).filter(Project.id == project_id).first()
         if not project:
             return
 
-        # GenAIPro API key: DB setting → .env fallback
-        api_key = (
-            _get_db_setting(db, "genaipro_api_key")
-            or settings.genaipro_api_key
-            or ""
-        )
-        if not api_key:
-            raise RuntimeError(
-                "GENAIPRO_API_KEY no configurado. "
-                "Agrega la clave en Ajustes → GenAIPro API Keys."
-            )
+        img_provider = _get_image_provider(db)
+        poll_key = _get_pollinations_api_key(db)
+        _log(db, project_id, f"🔑 {img_provider.capitalize()} configurado.", stage="media")
 
         _update_project(db, project, status=ProjectStatus.generating_images)
-        _log(db, project_id, "🎨 Iniciando generación de imágenes con GenAIPro Veo…", stage="media")
+        _log(db, project_id, f"🎨 Iniciando generación de imágenes con {img_provider.capitalize()}…", stage="media")
 
         chunks = (
             db.query(Chunk)
@@ -881,32 +922,47 @@ def _run_generate_images(project_id: int) -> None:
                     .all()
                 )
                 _log(db, project_id,
-                     f"✅ {len(prompt_map)} prompts generados. Iniciando Genaipro Veo…",
+                     f"✅ {len(prompt_map)} prompts generados. Iniciando {img_provider.capitalize()}…",
                      stage="media")
             except Exception as exc:
                 _log(db, project_id,
                      f"⚠️ Batch Gemini falló ({exc}). Prompts se generarán por escena.",
                      stage="media", level="warning")
 
-        # ── STEP 2: Image + video generation — sequential (one at a time) ──────
+        # ── STEP 2: Image generation — parallel (max 5 concurrent) ──────────
+        _log(db, project_id, f"⚡ Generando {total} imágenes en paralelo (max 5)…", stage="media")
+
+        # Gather chunk metadata before spawning threads (DB objects aren't thread-safe)
+        chunk_args = [
+            (project_id, chunk.id, project.slug, project.reference_character, poll_key)
+            for chunk in chunks
+        ]
+
         errors: list[str] = []
-        for idx, chunk in enumerate(chunks, 1):
-            _log(db, project_id,
-                 f"⏳ Procesando escena {idx} de {total} (chunk #{chunk.chunk_number})…",
-                 stage="media_progress")
-            try:
-                _generate_media_for_chunk(
-                    project_id, chunk.id, project.slug,
-                    project.reference_character, api_key,
-                )
-                _log(db, project_id,
-                     f"✅ Escena {idx}/{total} lista.",
-                     stage="media_progress")
-            except Exception as exc:
-                errors.append(f"Escena #{chunk.chunk_number}: {exc}")
-                _log(db, project_id,
-                     f"❌ Escena {idx}/{total} (chunk #{chunk.chunk_number}) falló: {exc}",
-                     stage="media_progress", level="error")
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {
+                pool.submit(
+                    _generate_media_for_chunk, *args
+                ): args[1]  # chunk.id
+                for args in chunk_args
+            }
+            for future in as_completed(futures):
+                chunk_id = futures[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    errors.append(f"Chunk {chunk_id}: {exc}")
+
+        # Refresh to get updated chunk statuses
+        db.expire_all()
+        done_count = (
+            db.query(Chunk)
+            .filter(Chunk.project_id == project_id, Chunk.status == ChunkStatus.done)
+            .count()
+        )
+        _log(db, project_id,
+             f"Imagen 4 Fast: {done_count}/{total} imágenes generadas.",
+             stage="media_progress")
 
         if errors:
             _update_project(
@@ -920,7 +976,7 @@ def _run_generate_images(project_id: int) -> None:
         else:
             _update_project(db, project, status=ProjectStatus.images_ready)
             _log(db, project_id,
-                 f"✅ {total} escenas procesadas (imagen + video) con Genaipro Veo.",
+                 f"✅ {total} escenas procesadas con Google Imagen 4 Fast.",
                  stage="media_done")
 
     except Exception as exc:
@@ -939,7 +995,7 @@ def _run_generate_images(project_id: int) -> None:
 
 
 def start_generate_images(project_id: int) -> None:
-    """Launch Genaipro image+video generation in a background daemon thread."""
+    """Launch Pollinations image generation in a background daemon thread."""
     t = threading.Thread(target=_run_generate_images, args=(project_id,), daemon=True)
     t.start()
 
@@ -1076,7 +1132,7 @@ def _process_chunk_video(
 
         audio_path = Path(chunk.audio_path) if chunk.audio_path else vo_dir / f"audio-chunk-{n}.mp3"
 
-        # SRT: use existing SRT (GenAIPro) or generate synthetic — never calls Whisper
+        # SRT: use existing SRT (TTS provider) or generate synthetic — never calls Whisper
         srt_path = _resolve_srt(db, project_id, chunk, n, audio_path, vo_dir)
 
         if mode == VideoMode.animated:
@@ -1262,15 +1318,15 @@ def _run_generate_voiceover(project_id: int):
                     stage=f"chunk_{chunk.chunk_number}_tts",
                 )
 
-                # SRT: use GenAIPro's file if returned, otherwise generate from script
+                # SRT: use TTS provider's file if returned, otherwise generate from script
                 srt_path = audio_path.with_suffix(".srt")
                 if srt_path.exists():
                     srt_path_str = str(srt_path)
                     _log(db, project_id,
-                         f"[Chunk {chunk.chunk_number}] SRT descargado desde GenAIPro.",
+                         f"[Chunk {chunk.chunk_number}] SRT descargado desde TTS provider.",
                          stage=f"chunk_{chunk.chunk_number}_tts")
                 else:
-                    # GenAIPro didn't return subtitles for this voice —
+                    # TTS provider didn't return subtitles for this voice —
                     # generate SRT locally from the script text + audio duration.
                     # Text is the exact script that was spoken, so this is correct.
                     try:
@@ -1349,12 +1405,7 @@ def _run_generate_voiceover(project_id: int):
 
 
 def _animated_branch(db, project_id, chunk, n, slug, narration, visual_desc, reference_character, c_dir, api_key: str = "") -> Path:
-    """Animated mode: generate image prompt → Genaipro image → Genaipro video → return video path."""
-    # Genaipro API key: prefer explicit arg, then DB setting, then .env
-    gp_key = api_key or _get_db_setting(db, "genaipro_api_key") or settings.genaipro_api_key or ""
-    if not gp_key:
-        raise RuntimeError("GENAIPRO_API_KEY no configurado para _animated_branch.")
-
+    """Animated mode: image prompt → Pollinations image → WaveSpeed i2v → return video path."""
     # ── 3c-i. Generate image prompt ────────────────────────────────────────
     _log(db, project_id, f"[Chunk {n}] Generando prompt de imagen…", stage=f"chunk_{n}_imgprompt")
     img_prompt = (chunk.image_prompt or "").strip()
@@ -1363,25 +1414,38 @@ def _animated_branch(db, project_id, chunk, n, slug, narration, visual_desc, ref
     if not img_prompt:
         img_prompt = (narration or "").strip()[:800]
     _update_chunk(db, chunk, image_prompt=img_prompt)
-    print(f"DEBUG [animated_branch escena {n}] Prompt: {img_prompt[:150]}")
 
-    # ── 3c-ii. Generate image with Genaipro Veo ────────────────────────────
-    _log(db, project_id, f"[Chunk {n}] 🎨 Generando imagen con Genaipro Veo…", stage=f"chunk_{n}_image")
+    # ── 3c-ii. Generate image ───────────────────────────────────────────
+    img_provider = _get_image_provider(db)
+    _log(db, project_id, f"[imagen_{n}] Generando con {img_provider.capitalize()}…", stage=f"chunk_{n}_image")
     img_path = c_dir / "images" / f"image_{n}.jpg"
     img_path.parent.mkdir(parents=True, exist_ok=True)
-    genaipro_media_service.generate_image(img_prompt, img_path, gp_key)
+    poll_key = _get_pollinations_api_key(db)
+    ws_key = _get_wavespeed_api_key(db)
+    project_obj = db.query(Project).filter(Project.id == project_id).first()
+    ref_char = _get_reference_character(db, project_obj) if project_obj else None
+    ref_style = _get_reference_style(db, project_obj) if project_obj else None
+    _dispatch_generate_image(
+        img_prompt, img_path,
+        provider=img_provider, api_key=poll_key, wavespeed_api_key=ws_key,
+        reference_character_path=ref_char, reference_style_path=ref_style,
+    )
     _update_chunk(db, chunk, image_path=str(img_path))
+    _log(db, project_id, f"[imagen_{n}] ✅ Guardada: image_{n}.jpg", stage=f"chunk_{n}_image")
 
-    # ── 3c-iii. Animate image with Genaipro Veo ────────────────────────────
+    # ── 3c-iii. Animate image with WaveSpeed i2v ──────────────────────────
     anim_prompt = chunk.motion_prompt or chunk.video_prompt or "Slow cinematic zoom in, subtle camera movement"
-    _log(db, project_id, f"[Chunk {n}] 🎬 Animando imagen con Genaipro Veo…", stage=f"chunk_{n}_animate")
+    _log(db, project_id, f"[Chunk {n}] Animando imagen con WaveSpeed i2v...", stage=f"chunk_{n}_animate")
     video_path = c_dir / "videos" / f"video_{n}.mp4"
     video_path.parent.mkdir(parents=True, exist_ok=True)
+    ws_key = _get_wavespeed_api_key(db)
     try:
-        genaipro_media_service.animate_image(img_path, video_path, gp_key, prompt=anim_prompt)
+        wavespeed_service.animate_image(
+            img_path, video_path, prompt=anim_prompt, api_key=ws_key,
+        )
     except Exception as vid_exc:
         _log(db, project_id,
-             f"[Chunk {n}] ⚠️ Video falló: {vid_exc}. Usando imagen estática como respaldo.",
+             f"[Chunk {n}] Video fallo: {vid_exc}. Usando imagen estatica como respaldo.",
              stage=f"chunk_{n}_animate", level="warning")
         # Return the image path — NCA will treat it as a still frame
         return img_path
@@ -1445,7 +1509,7 @@ def _stock_branch(db, project_id, chunk, n, slug, narration, visual_desc, c_dir)
 # ── Per-chunk image retry ─────────────────────────────────────────────────────
 
 def _run_retry_chunk_image(project_id: int, chunk_number: int) -> None:
-    """Re-generate image + video for a single scene chunk using Genaipro Veo."""
+    """Re-generate image for a single scene chunk using Pollinations."""
     db = SessionLocal()
     try:
         project = db.query(Project).filter(Project.id == project_id).first()
@@ -1461,10 +1525,7 @@ def _run_retry_chunk_image(project_id: int, chunk_number: int) -> None:
             _log(db, project_id, f"Chunk {chunk_number} no encontrado.", stage="retry_media", level="error")
             return
 
-        api_key = _get_db_setting(db, "genaipro_api_key") or settings.genaipro_api_key or ""
-        if not api_key:
-            _log(db, project_id, "GENAIPRO_API_KEY no configurado.", stage="retry_media", level="error")
-            return
+        api_key = _get_pollinations_api_key(db)
 
         # Reset chunk status so _generate_media_for_chunk doesn't skip it
         _update_chunk(db, chunk, status=ChunkStatus.pending, error_message=None)
@@ -1493,10 +1554,10 @@ def start_retry_chunk_image(project_id: int, chunk_number: int) -> None:
     t.start()
 
 
-# ── Per-chunk Genaipro image-only regeneration ────────────────────────────────
+# ── Per-chunk image-only regeneration (Google Imagen 4 Fast) ──────────────────
 
 def _run_regenerate_image_genaipro(project_id: int, chunk_number: int) -> None:
-    """Re-generate ONLY the image for one scene chunk using Genaipro Veo.
+    """Re-generate ONLY the image for one scene chunk using Pollinations.
 
     Uses the existing image_prompt stored in the chunk DB record.
     Overwrites image_N.jpg in-place so downstream FFmpeg picks up the new file.
@@ -1516,11 +1577,11 @@ def _run_regenerate_image_genaipro(project_id: int, chunk_number: int) -> None:
             _log(db, project_id, f"Chunk {chunk_number} no encontrado.", stage="regen_img", level="error")
             return
 
-        api_key = _get_db_setting(db, "replicate_api_key") or settings.replicate_api_token or ""
-        if not api_key:
-            _log(db, project_id, "REPLICATE_API_KEY no configurado.", stage="regen_img", level="error")
-            return
-
+        img_provider = _get_image_provider(db)
+        poll_key = _get_pollinations_api_key(db)
+        ws_key = _get_wavespeed_api_key(db)
+        ref_char = _get_reference_character(db, project)
+        ref_style = _get_reference_style(db, project)
         n = chunk.chunk_number
 
         # Resolve prompt: prefer image_prompt, fall back to scene_text
@@ -1541,27 +1602,31 @@ def _run_regenerate_image_genaipro(project_id: int, chunk_number: int) -> None:
             _update_chunk(db, chunk, status=ChunkStatus.error, error_message=msg)
             return
 
-        print(f"DEBUG [Regen escena {n}] Enviando prompt a Genaipro: {img_prompt[:150]}")
-        _log(db, project_id,
-             f"[Regen {n}] Prompt ({len(img_prompt)} chars): {img_prompt[:100]}…",
-             stage=f"regen_img_{n}")
-
         c_dir = chunk_dir(project.slug, n)
         img_path = c_dir / "images" / f"image_{n}.jpg"
         img_path.parent.mkdir(parents=True, exist_ok=True)
 
         _log(db, project_id,
-             f"[Regen {n}] 🎨 Regenerando imagen con Replicate Seedream…",
+             f"[imagen_{n}] Generando con {img_provider.capitalize()}…",
              stage=f"regen_img_{n}")
 
-        replicate_service.generate_image(img_prompt, img_path, api_key)
+        _dispatch_generate_image(
+            img_prompt, img_path,
+            provider=img_provider, api_key=poll_key, wavespeed_api_key=ws_key,
+            reference_character_path=ref_char, reference_style_path=ref_style,
+        )
+
+        _log(db, project_id,
+             f"[imagen_{n}] ✅ Guardada: image_{n}.jpg",
+             stage=f"regen_img_{n}")
+
         _update_chunk(db, chunk, status=ChunkStatus.done, image_path=str(img_path), error_message=None)
-        
+
         # Also clear project-level error if this was a manual retry that succeeded
         _update_project(db, project, status=ProjectStatus.images_ready, error_message=None)
 
         _log(db, project_id,
-             f"[Regen {n}] ✓ Imagen regenerada ({img_path.stat().st_size // 1024} KB).",
+             f"✅ Escena #{n} actualizada y marcada como lista",
              stage=f"regen_img_{n}_done")
 
     except Exception as exc:
@@ -1583,7 +1648,7 @@ def _run_regenerate_image_genaipro(project_id: int, chunk_number: int) -> None:
 
 
 def start_regenerate_image_genaipro(project_id: int, chunk_number: int) -> None:
-    """Launch single-chunk Genaipro image regeneration in a background daemon thread."""
+    """Launch single-chunk Pollinations image regeneration in a background daemon thread."""
     t = threading.Thread(
         target=_run_regenerate_image_genaipro,
         args=(project_id, chunk_number),
@@ -1592,13 +1657,14 @@ def start_regenerate_image_genaipro(project_id: int, chunk_number: int) -> None:
     t.start()
 
 
-# ── Bulk Genaipro image regeneration (all scenes) ─────────────────────────────
+# ── Bulk image regeneration (all scenes) — Google Imagen 4 Fast ──────────────
 
 def _run_regenerate_all_genaipro(project_id: int) -> None:
-    """Re-generate images for ALL scene chunks using Genaipro Veo.
+    """Re-generate images for ALL scene chunks using Pollinations.
 
     Uses image_prompt if available, falls back to scene_text.
-    Processes sequentially. Overwrites image_N.jpg in-place.
+    Processes up to 5 images in parallel via ThreadPoolExecutor.
+    Overwrites image_N.jpg in-place.
     Does NOT touch motion prompts or videos — image only.
     """
     db = SessionLocal()
@@ -1607,12 +1673,12 @@ def _run_regenerate_all_genaipro(project_id: int) -> None:
         if not project:
             return
 
-        api_key = _get_db_setting(db, "genaipro_api_key") or settings.genaipro_api_key or ""
-        if not api_key:
-            _log(db, project_id, "GENAIPRO_API_KEY no configurado.", stage="regen_all", level="error")
-            return
+        img_provider = _get_image_provider(db)
+        poll_key = _get_pollinations_api_key(db)
+        ws_key = _get_wavespeed_api_key(db)
+        ref_char = _get_reference_character(db, project)
+        ref_style = _get_reference_style(db, project)
 
-        # Query ALL chunks — fallback to scene_text handles missing image_prompt
         chunks = (
             db.query(Chunk)
             .filter(Chunk.project_id == project_id)
@@ -1626,64 +1692,115 @@ def _run_regenerate_all_genaipro(project_id: int) -> None:
 
         total = len(chunks)
         _log(db, project_id,
-             f"⚡ Regenerando {total} imágenes con Replicate Seedream 4.5…",
+             f"⚡ Regenerando {total} imágenes con {img_provider.capitalize()} (paralelo)…",
              stage="regen_all")
 
-        errors: list[str] = []
-        for idx, chunk in enumerate(chunks, 1):
+        # Prepare tasks: resolve prompts and paths upfront
+        tasks: list[dict] = []
+        skipped: list[str] = []
+        for chunk in chunks:
             n = chunk.chunk_number
-            _log(db, project_id,
-                 f"⏳ Regenerando imagen {idx}/{total} (escena #{n})…",
-                 stage="regen_all_progress")
+            img_prompt = (chunk.image_prompt or "").strip()
+            if not img_prompt:
+                img_prompt = (chunk.scene_text or "").strip()[:800]
+                if img_prompt:
+                    _log(db, project_id,
+                         f"[Regen {n}] ⚠️ Sin image_prompt — usando narración como fallback.",
+                         stage="regen_all_progress", level="warning")
+            if not img_prompt:
+                msg = f"Escena #{n}: sin prompt y sin texto de escena — omitida."
+                skipped.append(msg)
+                _log(db, project_id, f"⚠️ {msg}", stage="regen_all_progress", level="warning")
+                _update_chunk(db, chunk, status=ChunkStatus.error,
+                              error_message="Sin prompt visual — genera los prompts primero.")
+                continue
+
+            c_dir = chunk_dir(project.slug, n)
+            img_path = c_dir / "images" / f"image_{n}.jpg"
+            img_path.parent.mkdir(parents=True, exist_ok=True)
+            tasks.append({"chunk": chunk, "prompt": img_prompt, "path": img_path, "n": n})
+
+        # Generate images in parallel (max 5 concurrent)
+        errors: list[str] = []
+
+        def _gen_one(task: dict) -> tuple[int, str | None]:
+            """Generate a single image. Returns (chunk_number, error_or_None)."""
+            n = task["n"]
             try:
-                # Resolve prompt: prefer image_prompt, fall back to scene_text
-                img_prompt = (chunk.image_prompt or "").strip()
-                if not img_prompt:
-                    img_prompt = (chunk.scene_text or "").strip()[:800]
-                    if img_prompt:
-                        _log(db, project_id,
-                             f"[Regen {n}] ⚠️ Sin image_prompt — usando narración como fallback.",
-                             stage="regen_all_progress", level="warning")
-
-                if not img_prompt:
-                    msg = f"Escena #{n}: sin prompt y sin texto de escena — omitida."
-                    errors.append(msg)
-                    _log(db, project_id, f"⚠️ {msg}", stage="regen_all_progress", level="warning")
-                    _update_chunk(db, chunk, status=ChunkStatus.error,
-                                  error_message="Sin prompt visual — genera los prompts primero.")
-                    continue
-
-                print(f"DEBUG [Regen ALL escena {n}] Prompt: {img_prompt[:150]}")
-
-                c_dir = chunk_dir(project.slug, n)
-                img_path = c_dir / "images" / f"image_{n}.jpg"
-                img_path.parent.mkdir(parents=True, exist_ok=True)
-
-                genaipro_media_service.generate_image(img_prompt, img_path, api_key)
-                _update_chunk(db, chunk, status=ChunkStatus.done, image_path=str(img_path), error_message=None)
-
-                _log(db, project_id,
-                     f"✅ Imagen {idx}/{total} regenerada ({img_path.stat().st_size // 1024} KB).",
-                     stage="regen_all_progress")
+                print(f"[imagen_{n}] Generando con {img_provider.capitalize()}…")
+                _dispatch_generate_image(
+                    task["prompt"], task["path"],
+                    provider=img_provider, api_key=poll_key, wavespeed_api_key=ws_key,
+                    reference_character_path=ref_char, reference_style_path=ref_style,
+                )
+                print(f"[imagen_{n}] ✅ Guardada: image_{n}.jpg")
+                return (n, None)
             except Exception as exc:
-                errors.append(f"Escena #{n}: {exc}")
-                _log(db, project_id,
-                     f"❌ Imagen {idx}/{total} (escena #{n}) falló: {exc}",
-                     stage="regen_all_progress", level="error")
-                try:
-                    db.expire_all()
-                    _update_chunk(db, chunk, status=ChunkStatus.error, error_message=str(exc))
-                except Exception:
-                    pass
+                return (n, str(exc))
 
-        if errors:
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(_gen_one, t): t for t in tasks}
+            done_count = 0
+            for future in as_completed(futures):
+                task = futures[future]
+                n = task["n"]
+                chunk = task["chunk"]
+                done_count += 1
+                n_result, err = future.result()
+                if err:
+                    errors.append(f"Escena #{n}: {err}")
+                    _log(db, project_id,
+                         f"❌ Imagen escena #{n} falló: {err}",
+                         stage="regen_all_progress", level="error")
+                    update_db = SessionLocal()
+                    try:
+                        c = update_db.query(Chunk).filter(
+                            Chunk.project_id == project_id,
+                            Chunk.chunk_number == n,
+                        ).first()
+                        if c:
+                            c.status = ChunkStatus.error
+                            c.error_message = err
+                            c.updated_at = datetime.utcnow()
+                            update_db.commit()
+                    except Exception:
+                        update_db.rollback()
+                    finally:
+                        update_db.close()
+                else:
+                    _log(db, project_id,
+                         f"✅ Escena #{n} regenerada ({done_count}/{len(tasks)})",
+                         stage="regen_all_progress")
+                    # Use a fresh session for each DB update to avoid SQLite locking
+                    update_db = SessionLocal()
+                    try:
+                        c = update_db.query(Chunk).filter(
+                            Chunk.project_id == project_id,
+                            Chunk.chunk_number == n,
+                        ).first()
+                        if c:
+                            c.status = ChunkStatus.done
+                            c.image_path = str(task["path"])
+                            c.error_message = None
+                            c.updated_at = datetime.utcnow()
+                            update_db.commit()
+                    except Exception as db_exc:
+                        update_db.rollback()
+                        _log(db, project_id,
+                             f"⚠️ Escena #{n}: imagen guardada en disco pero DB falló: {db_exc}",
+                             stage="regen_all_progress", level="warning")
+                    finally:
+                        update_db.close()
+
+        all_errors = skipped + errors
+        if all_errors:
             _log(db, project_id,
-                 f"⚠️ Regeneración completada con {len(errors)} error(es): {'; '.join(errors[:3])}",
+                 f"⚠️ Regeneración completada con {len(all_errors)} error(es): {'; '.join(all_errors[:3])}",
                  stage="regen_all_done", level="error")
         else:
             _update_project(db, project, status=ProjectStatus.images_ready, error_message=None)
             _log(db, project_id,
-                 f"✅ {total} imágenes regeneradas con GenAIPro Veo.",
+                 f"✅ {total} imágenes regeneradas con Pollinations.",
                  stage="regen_all_done")
 
     except Exception as exc:
@@ -1695,7 +1812,7 @@ def _run_regenerate_all_genaipro(project_id: int) -> None:
 
 
 def start_regenerate_all_genaipro(project_id: int) -> None:
-    """Launch bulk Genaipro image regeneration in a background daemon thread."""
+    """Launch bulk image regeneration (Pollinations) in a background daemon thread."""
     t = threading.Thread(
         target=_run_regenerate_all_genaipro,
         args=(project_id,),
@@ -1744,140 +1861,134 @@ def start_generate_motion_prompts(project_id: int) -> None:
     t.start()
 
 
-# ── Phase 4: Animación Masiva (Meta AI) ───────────────────────────────────────
+# ── Phase 4: Animación con WaveSpeed i2v ───────────────────────────────────────
 
-async def _animate_scene_task(db, project, chunk, chunk_n: int, c_dir: Path):
-    """
-    Animate one scene: tries Meta AI (2 attempts), then Grok+Replicate as Plan B.
+def _animate_one_scene(project_id: int, chunk_number: int, slug: str, api_key: str) -> tuple[int, str | None]:
+    """Animate a single scene with WaveSpeed i2v. Returns (chunk_number, error_or_None)."""
+    db = SessionLocal()
+    try:
+        chunk = db.query(Chunk).filter(
+            Chunk.project_id == project_id, Chunk.chunk_number == chunk_number,
+        ).first()
+        if not chunk or not chunk.image_path:
+            return (chunk_number, "Sin imagen")
 
-    Plan B is activated automatically when Meta AI fails twice and a Grok API
-    key is stored in the DB settings (key = 'grok_api_key').
-    """
-    if not chunk.image_path or not chunk.motion_prompt:
-        return
+        n = chunk.chunk_number
+        anim_prompt = chunk.motion_prompt or chunk.video_prompt or "Slow cinematic zoom in, subtle camera movement"
 
-    out_dir = c_dir / "videos"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    video_path = out_dir / f"video_{chunk_n}.mp4"
+        c_dir = chunk_dir(slug, n)
+        video_path = c_dir / "videos" / f"video_{n}.mp4"
+        video_path.parent.mkdir(parents=True, exist_ok=True)
 
-    _log(db, project.id, f"[Animación {chunk_n}] Iniciando Meta AI…", stage=f"animate_{chunk_n}")
-
-    # ── Meta AI: 2 attempts ────────────────────────────────────────────────────
-    meta_errors: list[str] = []
-    for attempt in range(2):
-        try:
-            await meta_bot.animate_scene(chunk.image_path, chunk.motion_prompt, str(video_path))
-            _update_chunk(db, chunk, video_path=str(video_path))
-            _log(db, project.id, f"[Animación {chunk_n}] ✓ Meta AI éxito.", stage=f"animate_{chunk_n}_done")
-            return
-        except Exception as exc:
-            meta_errors.append(str(exc))
-            _log(
-                db, project.id,
-                f"[Animación {chunk_n}] Meta AI intento {attempt + 1}/2 falló: {exc}",
-                stage=f"animate_{chunk_n}_error",
-                level="warning",
-            )
-            if attempt < 1:
-                await asyncio.sleep(5)
-
-    # ── Plan B: Grok Vision → Replicate LTX Video ─────────────────────────────
-    grok_key = _get_db_setting(db, "grok_api_key")
-    replicate_key = _get_db_setting(db, "replicate_api_key") or settings.replicate_api_token or ""
-
-    if grok_key:
-        _log(
-            db, project.id,
-            f"[Animación {chunk_n}] ⚠️ Meta AI falló 2×. Activando Plan B: Grok + Replicate LTX…",
-            stage=f"animate_{chunk_n}_grok",
-        )
-        try:
-            # grok_service is synchronous — run it in a thread so we don't block the loop
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: grok_service.animate_with_grok_fallback(
-                    image_path=chunk.image_path,
-                    motion_prompt=chunk.motion_prompt,
-                    output_path=str(video_path),
-                    grok_api_key=grok_key,
-                    replicate_api_key=replicate_key,
-                ),
-            )
-            _update_chunk(db, chunk, video_path=str(video_path))
-            _log(
-                db, project.id,
-                f"[Animación {chunk_n}] ✓ Plan B (Grok + Replicate) éxito.",
-                stage=f"animate_{chunk_n}_done",
-            )
-            return
-        except Exception as grok_exc:
-            _log(
-                db, project.id,
-                f"[Animación {chunk_n}] Plan B también falló: {grok_exc}",
-                stage=f"animate_{chunk_n}_error",
-                level="error",
-            )
-    else:
-        _log(
-            db, project.id,
-            (
-                f"[Animación {chunk_n}] ⚠️ Meta AI falló 2×. "
-                "Grok API key no configurada — Plan B no disponible. "
-                "Agrega 'grok_api_key' en Ajustes para activar el fallback automático."
-            ),
-            stage=f"animate_{chunk_n}_error",
-            level="warning",
+        print(f"[WaveSpeed {n}] Animando: {anim_prompt[:80]}...")
+        wavespeed_service.animate_image(
+            Path(chunk.image_path), video_path,
+            prompt=anim_prompt, api_key=api_key,
         )
 
-    # ── All options exhausted ──────────────────────────────────────────────────
-    error_summary = " | ".join(meta_errors[:2])
-    _update_chunk(
-        db, chunk,
-        status=ChunkStatus.error,
-        error_message=f"Meta AI (2 intentos) falló; Grok Plan B {'también falló' if grok_key else 'no configurado'}. Último error: {error_summary}",
-    )
+        # Update DB
+        chunk.video_path = str(video_path)
+        chunk.status = ChunkStatus.done
+        chunk.error_message = None
+        chunk.updated_at = datetime.utcnow()
+        db.commit()
+        print(f"[WaveSpeed {n}] Video guardado: video_{n}.mp4 ({video_path.stat().st_size // 1024} KB)")
+        return (n, None)
 
-async def _animate_batch(db, project, chunks):
-    """Run Meta AI animations with a semaphore limiting to 3 concurrent tasks."""
-    semaphore = asyncio.Semaphore(3)
-    
-    async def _sem_worker(chunk):
-        async with semaphore:
-            chunk_n = chunk.chunk_number
-            c_dir = chunk_dir(project.slug, chunk_n)
-            await _animate_scene_task(db, project, chunk, chunk_n, c_dir)
-            
-    tasks = [_sem_worker(c) for c in chunks]
-    await asyncio.gather(*tasks)
+    except Exception as exc:
+        db.rollback()
+        try:
+            chunk = db.query(Chunk).filter(
+                Chunk.project_id == project_id, Chunk.chunk_number == chunk_number,
+            ).first()
+            if chunk:
+                chunk.status = ChunkStatus.error
+                chunk.error_message = str(exc)
+                chunk.updated_at = datetime.utcnow()
+                db.commit()
+        except Exception:
+            pass
+        return (chunk_number, str(exc))
+    finally:
+        db.close()
+
 
 def _run_animate_scenes(project_id: int) -> None:
+    """Animate all scenes that have images but no videos using WaveSpeed i2v.
+
+    Runs max 2 concurrent animations (video generation takes 1-3 min each).
+    """
     db = SessionLocal()
     try:
         project = db.query(Project).filter(Project.id == project_id).first()
         if not project:
             return
 
-        _log(db, project_id, "Iniciando Motor de Animación Masiva (Meta AI)…", stage="animate_mass")
-        
-        # Select chunks that have images but no videos yet
+        ws_key = _get_wavespeed_api_key(db)
+        if not ws_key:
+            _log(db, project_id, "WAVESPEED_API_KEY no configurado.", stage="animate", level="error")
+            return
+
         chunks = (
             db.query(Chunk)
-            .filter(Chunk.project_id == project_id, Chunk.image_path != None, Chunk.video_path == None, Chunk.status != ChunkStatus.error)
+            .filter(
+                Chunk.project_id == project_id,
+                Chunk.image_path != None,
+                (Chunk.video_path == None) | (Chunk.video_path == ""),
+            )
             .order_by(Chunk.chunk_number)
             .all()
         )
-        
+
         if not chunks:
-            _log(db, project_id, "No hay escenas pendientes de animación.", stage="animate_mass")
+            _log(db, project_id, "No hay escenas pendientes de animacion.", stage="animate")
             return
-            
-        asyncio.run(_animate_batch(db, project, chunks))
-        _log(db, project_id, "Animación masiva completada.", stage="animate_mass_done")
-        
+
+        total = len(chunks)
+        _log(db, project_id,
+             f"Animando {total} escenas con WaveSpeed i2v (max 2 simultaneas)...",
+             stage="animate")
+
+        slug = project.slug
+        chunk_numbers = [c.chunk_number for c in chunks]
+
+        errors: list[str] = []
+        done_count = 0
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {
+                pool.submit(_animate_one_scene, project_id, cn, slug, ws_key): cn
+                for cn in chunk_numbers
+            }
+            for future in as_completed(futures):
+                cn = futures[future]
+                done_count += 1
+                n_result, err = future.result()
+                if err:
+                    errors.append(f"Escena #{cn}: {err}")
+                    _log(db, project_id,
+                         f"Animacion escena #{cn} fallo: {err}",
+                         stage="animate_progress", level="error")
+                else:
+                    _log(db, project_id,
+                         f"Escena #{cn} animada ({done_count}/{total})",
+                         stage="animate_progress")
+
+        if errors:
+            _log(db, project_id,
+                 f"Animacion completada con {len(errors)} error(es): {'; '.join(errors[:3])}",
+                 stage="animate_done", level="error")
+        else:
+            _log(db, project_id,
+                 f"{total} escenas animadas con WaveSpeed.",
+                 stage="animate_done")
+
     except Exception as exc:
-        _log(db, project_id, f"Error en animación masiva: {exc}", stage="animate_mass_error", level="error")
+        _log(db, project_id,
+             f"Error en animación masiva: {exc}\n{traceback.format_exc()}",
+             stage="animate_error", level="error")
     finally:
         db.close()
+
 
 def start_animate_scenes(project_id: int) -> None:
     t = threading.Thread(target=_run_animate_scenes, args=(project_id,), daemon=True)

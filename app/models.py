@@ -52,6 +52,8 @@ class Project(Base):
     video_type = Column(String(50), nullable=True, default="top10")
     duration = Column(String(20), nullable=True, default="6-8")
     reference_character = Column(String(255), nullable=True)
+    reference_character_path = Column(String(512), nullable=True)  # character reference image for kontext
+    reference_style_path = Column(String(512), nullable=True)      # style reference image for kontext
     script = Column(Text, nullable=True)
     script_approved = Column(Boolean, default=False, nullable=False)
     script_final = Column(Text, nullable=True)

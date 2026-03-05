@@ -7,13 +7,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import List
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import Project, Chunk, ProjectStatus
 from ..schemas import ProjectCreate, ProjectOut, ProjectListItem, ScriptApprovalPayload, ResplitPayload, VoiceConfigPayload
+from ..config import PROJECTS_PATH
 from ..services.pipeline_service import start_pipeline, start_pipeline_phase2, start_regenerate_script, start_resplit_chunks, start_generate_voiceover, start_pipeline_phase3, start_create_scenes_from_srt, start_generate_images, start_retry_chunk_image, start_generate_motion_prompts, start_animate_scenes, start_regenerate_image_genaipro, start_regenerate_all_genaipro
 from pydantic import BaseModel
 
@@ -146,8 +147,6 @@ def regenerate_script(project_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Project not found")
     if project.status != ProjectStatus.awaiting_approval:
         raise HTTPException(status_code=400, detail="Project is not awaiting script approval")
-    if not project.outline:
-        raise HTTPException(status_code=400, detail="No outline available to regenerate from")
 
     project.status = ProjectStatus.queued
     project.updated_at = datetime.utcnow()
@@ -474,7 +473,7 @@ def retry_project(project_id: int, db: Session = Depends(get_db)):
 
 @router.post("/{project_id}/generate-images", response_model=ProjectOut)
 def generate_images(project_id: int, db: Session = Depends(get_db)):
-    """Launch Replicate Seedream 4.5 image generation for all scene chunks."""
+    """Launch Google Imagen 4 Fast image generation for all scene chunks."""
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -511,9 +510,26 @@ def get_chunk_image(project_id: int, chunk_number: int, db: Session = Depends(ge
     return FileResponse(str(img_path), media_type=media_type)
 
 
+@router.get("/{project_id}/chunk/{chunk_number}/video")
+def get_chunk_video(project_id: int, chunk_number: int, db: Session = Depends(get_db)):
+    """Serve the generated video for a specific scene chunk."""
+    chunk = db.query(Chunk).filter(
+        Chunk.project_id == project_id,
+        Chunk.chunk_number == chunk_number,
+    ).first()
+    if not chunk:
+        raise HTTPException(status_code=404, detail="Chunk no encontrado")
+    if not chunk.video_path:
+        raise HTTPException(status_code=404, detail="No hay video generado para esta escena")
+    vid_path = Path(chunk.video_path)
+    if not vid_path.exists():
+        raise HTTPException(status_code=404, detail=f"Archivo de video no encontrado: {chunk.video_path}")
+    return FileResponse(str(vid_path), media_type="video/mp4")
+
+
 @router.post("/{project_id}/retry-chunk-image/{chunk_number}", response_model=ProjectOut)
 def retry_chunk_image(project_id: int, chunk_number: int, db: Session = Depends(get_db)):
-    """Re-generate the image for a single scene chunk using Replicate Seedream 4.5."""
+    """Re-generate the image for a single scene chunk using Google Imagen 4 Fast."""
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -601,4 +617,118 @@ def regenerate_all_images_genaipro(project_id: int, db: Session = Depends(get_db
 
     start_regenerate_all_genaipro(project_id)
     return project
+
+
+# ── Reference Images (character + style) ──────────────────────────────────
+
+@router.post("/{project_id}/reference-character", response_model=ProjectOut)
+async def upload_reference_character(
+    project_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Upload a character reference image for kontext consistency."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    proj_dir = PROJECTS_PATH / project.slug
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    ref_path = proj_dir / "reference_character.jpg"
+
+    content = await file.read()
+    ref_path.write_bytes(content)
+
+    project.reference_character_path = str(ref_path)
+    project.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@router.delete("/{project_id}/reference-character", response_model=ProjectOut)
+def delete_reference_character(project_id: int, db: Session = Depends(get_db)):
+    """Remove the character reference image."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if project.reference_character_path:
+        ref = Path(project.reference_character_path)
+        if ref.exists():
+            ref.unlink()
+
+    project.reference_character_path = None
+    project.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@router.get("/{project_id}/reference-character")
+def get_reference_character(project_id: int, db: Session = Depends(get_db)):
+    """Serve the character reference image."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project or not project.reference_character_path:
+        raise HTTPException(status_code=404, detail="No hay imagen de personaje")
+    ref = Path(project.reference_character_path)
+    if not ref.exists():
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+    return FileResponse(str(ref), media_type="image/jpeg")
+
+
+@router.post("/{project_id}/reference-style", response_model=ProjectOut)
+async def upload_reference_style(
+    project_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Upload a style reference image for kontext consistency."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    proj_dir = PROJECTS_PATH / project.slug
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    ref_path = proj_dir / "reference_style.jpg"
+
+    content = await file.read()
+    ref_path.write_bytes(content)
+
+    project.reference_style_path = str(ref_path)
+    project.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@router.delete("/{project_id}/reference-style", response_model=ProjectOut)
+def delete_reference_style(project_id: int, db: Session = Depends(get_db)):
+    """Remove the style reference image."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if project.reference_style_path:
+        ref = Path(project.reference_style_path)
+        if ref.exists():
+            ref.unlink()
+
+    project.reference_style_path = None
+    project.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@router.get("/{project_id}/reference-style")
+def get_reference_style(project_id: int, db: Session = Depends(get_db)):
+    """Serve the style reference image."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project or not project.reference_style_path:
+        raise HTTPException(status_code=404, detail="No hay imagen de estilo")
+    ref = Path(project.reference_style_path)
+    if not ref.exists():
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+    return FileResponse(str(ref), media_type="image/jpeg")
 

@@ -45,6 +45,8 @@ class ProjectOut(BaseModel):
     video_type: Optional[str]
     duration: Optional[str]
     reference_character: Optional[str]
+    reference_character_path: Optional[str] = None
+    reference_style_path: Optional[str] = None
     script: Optional[str]
     script_approved: bool = False
     script_final: Optional[str]

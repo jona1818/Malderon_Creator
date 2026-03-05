@@ -157,7 +157,7 @@
                     <div class="mode-icon">🎨</div>
                     <div class="mode-title">Animado</div>
                     <div class="mode-desc">
-                      Genera imágenes con IA (SeedDream) y las anima (LTX Video)
+                      Genera imágenes con IA (Google Imagen 4) y las anima
                     </div>
                   </div>
                 </label>
@@ -216,17 +216,7 @@
           <div class="chunk-grid" id="chunkGrid"></div>
         </div>
 
-        <!-- 1. Outline generado (colapsable) -->
-        <div class="outline-section" id="outlineSection" style="display:none">
-          <div class="outline-header" onclick="toggleOutline()">
-            <h2>Outline generado</h2>
-            <div class="outline-header-right">
-              <span class="badge badge-done">✓ Completado</span>
-              <span id="outlineToggle" class="outline-toggle">▼</span>
-            </div>
-          </div>
-          <div id="outlineContent" class="outline-content" style="display:none"></div>
-        </div>
+
 
         <!-- 2. Script generado (editable si awaiting_approval, solo lectura si aprobado) -->
         <div class="script-section" id="scriptSection" style="display:none">
@@ -390,27 +380,73 @@
 
         <!-- 4b. Imágenes panel — visible en estados scenes_ready / generating_images / images_ready -->
         <div class="scenes-ready-section card" id="scenesReadySection" style="display:none">
+          <!-- Reference Images Section (Character + Style) -->
+          <div id="referenceImagesSection" style="margin-bottom:16px; padding:12px; background:var(--bg-secondary); border-radius:8px;">
+            <div style="margin-bottom:8px;">
+              <strong>Referencias para Kontext</strong>
+              <span style="font-size:12px; color:var(--text-secondary); margin-left:6px;">(opcionales — activan modelo kontext)</span>
+            </div>
+            <div style="display:flex; gap:16px; flex-wrap:wrap;">
+              <!-- Character Reference -->
+              <div style="flex:1; min-width:180px;">
+                <div style="display:flex; align-items:center; gap:6px; margin-bottom:6px;">
+                  <span style="font-size:13px; font-weight:600;">Personaje</span>
+                  <span id="refCharStatus" style="font-size:11px; color:var(--text-secondary)"></span>
+                </div>
+                <div id="refCharPreview" style="display:none; margin-bottom:6px;">
+                  <img id="refCharThumb" style="max-height:70px; border-radius:4px; border:1px solid var(--border-color);" />
+                </div>
+                <div style="display:flex; gap:6px; align-items:center;">
+                  <label class="btn btn-ghost btn-sm" style="cursor:pointer; font-size:12px;">
+                    Subir
+                    <input type="file" accept="image/*" style="display:none" onchange="uploadReferenceCharacter(this)" />
+                  </label>
+                  <button class="btn btn-ghost btn-sm" id="deleteRefCharBtn" style="display:none; color:#e74c3c; font-size:12px;" onclick="deleteReferenceCharacter()">Eliminar</button>
+                </div>
+              </div>
+              <!-- Style Reference -->
+              <div style="flex:1; min-width:180px;">
+                <div style="display:flex; align-items:center; gap:6px; margin-bottom:6px;">
+                  <span style="font-size:13px; font-weight:600;">Estilo</span>
+                  <span id="refStyleStatus" style="font-size:11px; color:var(--text-secondary)"></span>
+                </div>
+                <div id="refStylePreview" style="display:none; margin-bottom:6px;">
+                  <img id="refStyleThumb" style="max-height:70px; border-radius:4px; border:1px solid var(--border-color);" />
+                </div>
+                <div style="display:flex; gap:6px; align-items:center;">
+                  <label class="btn btn-ghost btn-sm" style="cursor:pointer; font-size:12px;">
+                    Subir
+                    <input type="file" accept="image/*" style="display:none" onchange="uploadReferenceStyle(this)" />
+                  </label>
+                  <button class="btn btn-ghost btn-sm" id="deleteRefStyleBtn" style="display:none; color:#e74c3c; font-size:12px;" onclick="deleteReferenceStyle()">Eliminar</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div class="scenes-ready-header">
             <span id="scenesReadyLabel">✅ Escenas listas para generar imágenes</span>
             <span id="imagesProgressCount" class="images-progress-count" style="display:none"></span>
           </div>
           <button class="btn btn-primary btn-lg" id="generateImagesBtn" onclick="generateImages()">
-            🎨 Generar Imágenes con Google Imagen
+            🎨 Generar Imágenes
           </button>
           <button class="btn btn-success btn-lg" id="continueWithVideoBtn" style="display:none"
             onclick="continueWithVideo()">
             ▶️ Continuar con Video
           </button>
           <p class="scenes-ready-hint" id="scenesReadyHint">
-            Claude generará un prompt visual para cada escena y Google Imagen 3 creará la imagen correspondiente.
+            Gemini generará un prompt visual por escena y el proveedor seleccionado creará la imagen.
           </p>
-          <div id="metaAnimationSection"
+          <div id="veo3AnimationSection"
             style="margin-top:20px; padding-top:20px; border-top:1px solid var(--border-color); display:none">
-            <h3>🤖 Meta AI Automation</h3>
-            <p class="scenes-ready-hint">Las imágenes y prompts de movimiento están listos. Inicia la animación de todas
-              las escenas.</p>
-            <button class="btn btn-primary btn-lg" id="generateMetaAnimationBtn" onclick="startMetaAnimation()">
-              🎬 Generar Animaciones (Meta AI)
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+              <h3>🎬 Animar Escenas</h3>
+              <span id="animationProgress" style="font-size:13px; color:var(--text-secondary);"></span>
+            </div>
+            <p class="scenes-ready-hint">Anima cada imagen con WaveSpeed (wan-2.2 i2v). Máximo 2 animaciones simultáneas (~2 min c/u).</p>
+            <button class="btn btn-primary btn-lg" id="startVeo3AnimationBtn" onclick="startVeo3Animation()">
+              🎬 Animar con WaveSpeed
             </button>
           </div>
         </div>
@@ -439,13 +475,21 @@
           <h1>⚙️ Settings</h1>
         </div>
 
-        <!-- 0. Meta AI Automation -->
+        <!-- 0. Image Provider Selector -->
         <div class="settings-card" style="border-left: 4px solid var(--accent-blue)">
-          <h2 class="settings-card-title">🤖 Meta AI (Animación)</h2>
-          <p class="settings-card-hint">Inicia sesión en Meta AI una vez para que el bot de animación pueda operar de
-            forma automática.</p>
-          <div class="settings-actions" style="margin-top:10px; justify-content: flex-start;">
-            <button class="btn btn-primary" onclick="triggerMetaLogin()">🔗 Vincular/Login Meta AI</button>
+          <h2 class="settings-card-title">🎨 Proveedor de Imágenes</h2>
+          <p class="settings-card-hint">Selecciona el servicio para generar imágenes de escena. WaveSpeed también se usa para animación (image-to-video).</p>
+          <div class="settings-grid">
+            <div class="settings-field">
+              <label class="settings-label">Proveedor</label>
+              <select id="setting_image_provider" class="settings-select">
+                <option value="wavespeed">WaveSpeed (~$0.005–$0.025/imagen)</option>
+                <option value="pollinations">Pollinations (~$0.02/imagen, gratis con API key)</option>
+              </select>
+            </div>
+          </div>
+          <div style="margin-top:10px;">
+            <button class="btn btn-primary btn-sm" onclick="saveSetting('image_provider')">💾 Guardar Proveedor</button>
           </div>
         </div>
 
@@ -470,15 +514,35 @@
                 <input type="password" id="setting_genaipro_api_key" class="settings-input"
                   placeholder="API key de Genaipro" autocomplete="off" />
                 <button class="btn btn-ghost btn-sm" onclick="saveSetting('genaipro_api_key')">Guardar</button>
+                <button class="btn btn-ghost btn-sm" onclick="testGenaIproImage()" title="Diagnóstico: prueba /veo/create-image con tu clave">🔍 Test imagen</button>
+              </div>
+              <div id="genaipro-test-result" style="display:none;margin-top:8px;padding:8px;background:#1a1a1a;border-radius:4px;font-size:12px;white-space:pre-wrap;max-height:300px;overflow-y:auto;"></div>
+            </div>
+
+            <div class="settings-field">
+              <label class="settings-label">Pollinations (Imágenes)</label>
+              <div class="settings-key-row">
+                <input type="password" id="setting_pollinations_api_key" class="settings-input" placeholder="sk_..."
+                  autocomplete="off" />
+                <button class="btn btn-ghost btn-sm" onclick="saveSetting('pollinations_api_key')">Guardar</button>
               </div>
             </div>
 
             <div class="settings-field">
-              <label class="settings-label">Replicate</label>
+              <label class="settings-label">WaveSpeed (Imágenes + Animación)</label>
               <div class="settings-key-row">
-                <input type="password" id="setting_replicate_api_key" class="settings-input" placeholder="r8_..."
+                <input type="password" id="setting_wavespeed_api_key" class="settings-input"
+                  placeholder="API key de WaveSpeed" autocomplete="off" />
+                <button class="btn btn-ghost btn-sm" onclick="saveSetting('wavespeed_api_key')">Guardar</button>
+              </div>
+            </div>
+
+            <div class="settings-field">
+              <label class="settings-label">Google API Key</label>
+              <div class="settings-key-row">
+                <input type="password" id="setting_google_api_key" class="settings-input" placeholder="AIza..."
                   autocomplete="off" />
-                <button class="btn btn-ghost btn-sm" onclick="saveSetting('replicate_api_key')">Guardar</button>
+                <button class="btn btn-ghost btn-sm" onclick="saveSetting('google_api_key')">Guardar</button>
               </div>
             </div>
 

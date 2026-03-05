@@ -13,7 +13,9 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 _API_KEY_KEYS = {
     "anthropic_api_key",
     "genaipro_api_key",
-    "replicate_api_key",
+    "pollinations_api_key",
+    "wavespeed_api_key",
+    "google_api_key",
     "pexels_api_key",
     "pixabay_api_key",
 }
@@ -64,31 +66,99 @@ def get_raw_setting(key: str, db: Session = Depends(get_db)):
     return {"key": key, "value": row.value if row else None}
 
 
-@router.post("/meta-login")
-async def trigger_meta_login():
-    """Launch the browser automation to login to Meta AI manually."""
-    import subprocess
-    import sys
-    import os
-    from pathlib import Path
+@router.post("/test-genaipro-image")
+def test_genaipro_image(db: Session = Depends(get_db)):
+    """Diagnostic: send a minimal test prompt to /veo/create-image and return the raw response.
 
-    # Run setup_meta_login in a separate process to avoid FastAPI/asyncio loop conflicts on Windows.
-    script_content = """import asyncio
-from app.services.video import meta_bot
+    Uses the genaipro_api_key from settings. Returns full HTTP details so you can
+    see exactly what Genaipro is returning (JSON, SSE, error body, etc.).
+    """
+    import json as _json
+    import requests as _req
+    from ..models import AppSetting
+    from ..config import settings as _cfg
 
-if __name__ == '__main__':
-    asyncio.run(meta_bot.setup_meta_login())
-"""
-    
-    script_path = Path("run_meta_login.py")
-    script_path.write_text(script_content, encoding="utf-8")
-    
-    # Launch in background (detached process if possible on Windows or just pipe stdout)
-    CREATE_NO_WINDOW = 0x08000000
-    subprocess.Popen(
-        [sys.executable, str(script_path)],
-        cwd=os.getcwd(),
-        creationflags=CREATE_NO_WINDOW
-    )
+    row = db.query(AppSetting).filter(AppSetting.key == "genaipro_api_key").first()
+    api_key = (row.value or "") if row else ""
+    if not api_key:
+        api_key = _cfg.genaipro_api_key or ""
+    if not api_key:
+        return {"error": "genaipro_api_key no configurado en Ajustes"}
 
-    return {"status": "started", "message": "Revisa la ventana del navegador que se acaba de abrir."}
+    base_url = "https://genaipro.vn/api/v1"
+    test_prompt = "A beautiful sunset over the ocean, golden hour, cinematic"
+
+    results = []
+
+    def _read_first_lines(resp, max_chars: int = 2000) -> str:
+        """Read first max_chars from a streaming response."""
+        buf = []
+        total = 0
+        for chunk in resp.iter_content(chunk_size=512):
+            buf.append(chunk.decode(errors="replace"))
+            total += len(chunk)
+            if total >= max_chars:
+                break
+        return "".join(buf)[:max_chars]
+
+    # Test A: url-encoded form, no Accept header (sync JSON mode)
+    try:
+        with _req.post(
+            f"{base_url}/veo/create-image",
+            headers={"Authorization": f"Bearer {api_key}"},
+            data={"prompt": test_prompt, "number_of_images": "1"},
+            stream=True,
+            timeout=60,
+        ) as r:
+            body_preview = _read_first_lines(r)
+        try:
+            body_json = _json.loads(body_preview)
+        except Exception:
+            body_json = None
+        results.append({
+            "strategy": "A: url-encoded form, no Accept-SSE",
+            "http_status": r.status_code,
+            "content_type": r.headers.get("Content-Type", ""),
+            "body_preview": body_preview,
+            "body_json": body_json,
+        })
+    except Exception as exc:
+        results.append({
+            "strategy": "A: url-encoded form, no Accept-SSE",
+            "error": str(exc),
+        })
+
+    # Test B: multipart form, with Accept: text/event-stream
+    try:
+        with _req.post(
+            f"{base_url}/veo/create-image",
+            headers={"Authorization": f"Bearer {api_key}", "Accept": "text/event-stream"},
+            files={"prompt": (None, test_prompt), "number_of_images": (None, "1")},
+            stream=True,
+            timeout=60,
+        ) as r:
+            body_preview = _read_first_lines(r)
+        try:
+            body_json = _json.loads(body_preview)
+        except Exception:
+            body_json = None
+        results.append({
+            "strategy": "B: multipart form + Accept-SSE",
+            "http_status": r.status_code,
+            "content_type": r.headers.get("Content-Type", ""),
+            "body_preview": body_preview,
+            "body_json": body_json,
+        })
+    except Exception as exc:
+        results.append({
+            "strategy": "B: multipart form + Accept-SSE",
+            "error": str(exc),
+        })
+
+    return {
+        "api_key_suffix": f"…{api_key[-6:]}",
+        "test_prompt": test_prompt,
+        "results": results,
+    }
+
+

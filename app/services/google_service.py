@@ -35,7 +35,7 @@ def _api_key() -> str:
 # ── Batch Image Prompt Generation — Gemini 1.5 Flash ─────────────────────────
 
 _BATCH_PROMPT_SYSTEM = """You are a visual prompt engineer for AI image generation.
-Create detailed, cinematic image prompts optimized for Seedream 4.5.
+Create detailed, cinematic image prompts optimized for Google Imagen 4.
 For each scene, produce a rich, comma-separated description including:
 - Composition and framing
 - Lighting and color palette

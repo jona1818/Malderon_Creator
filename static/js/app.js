@@ -11,6 +11,12 @@ let lastLogId = 0;
 // Cached settings (loaded on demand)
 let _settings = {};
 
+/** Return capitalised image provider name from settings. */
+function _imgProviderName() {
+  const p = (_settings['image_provider'] || 'wavespeed');
+  return p.charAt(0).toUpperCase() + p.slice(1);
+}
+
 // Reference YouTube videos collected in the form [{url, title, transcript}]
 const referenceVideos = [];
 
@@ -105,16 +111,7 @@ async function loadDashboard() {
   }
 }
 
-// ── Outline collapse state ────────────────────────────────────────────────
-let _outlineOpen = false;
 
-function toggleOutline() {
-  _outlineOpen = !_outlineOpen;
-  const content = document.getElementById('outlineContent');
-  const toggle = document.getElementById('outlineToggle');
-  if (content) content.style.display = _outlineOpen ? '' : 'none';
-  if (toggle) toggle.textContent = _outlineOpen ? '▲' : '▼';
-}
 
 // ── Detail view ───────────────────────────────────────────────────────────
 async function openDetail(projectId) {
@@ -132,7 +129,6 @@ async function openDetail(projectId) {
 
   // Reset all sections
   document.getElementById('progressCard').style.display = 'none';
-  document.getElementById('outlineSection').style.display = 'none';
   document.getElementById('scriptSection').style.display = 'none';
   document.getElementById('voiceConfigSection').style.display = 'none';
   document.getElementById('voiceoverApprovalSection').style.display = 'none';
@@ -184,18 +180,7 @@ async function refreshDetail(projectId) {
       });
     }
 
-    // ── 1. Outline (colapsable) ───────────────────────────────────────────
-    const outlineSection = document.getElementById('outlineSection');
-    const outlineContent = document.getElementById('outlineContent');
-    const outlineToggleEl = document.getElementById('outlineToggle');
-    if (p.outline) {
-      outlineSection.style.display = '';
-      outlineContent.textContent = p.outline;
-      outlineContent.style.display = _outlineOpen ? '' : 'none';
-      if (outlineToggleEl) outlineToggleEl.textContent = _outlineOpen ? '▲' : '▼';
-    } else {
-      outlineSection.style.display = 'none';
-    }
+
 
     // ── 2. Script section (editable ↔ read-only) ──────────────────────────
     const scriptSection = document.getElementById('scriptSection');
@@ -384,10 +369,10 @@ async function refreshDetail(projectId) {
           retryHtml = `<button class="chunk-retry-btn" onclick="retryChunkImage(${c.chunk_number})">🔄 Reintentar imagen</button>`;
         }
 
-        // Genaipro regenerate button (visible when image_prompt exists and in image panel)
+        // Pollinations regenerate button (visible when image_prompt exists and in image panel)
         let regenHtml = '';
         if (c.image_prompt && showImagePanel) {
-          regenHtml = `<button class="chunk-regen-btn" onclick="regenerateImageGenaipro(${c.chunk_number})">⚡ Rehacer Imagen (Seedream)</button>`;
+          regenHtml = `<button class="chunk-regen-btn" onclick="regenerateImageGenaipro(${c.chunk_number})">⚡ Rehacer Imagen (${_imgProviderName()})</button>`;
         }
 
         // Motion Prompt logic (visible if project is in a state where it generated images)
@@ -436,6 +421,38 @@ async function refreshDetail(projectId) {
     const scenesReadySection = document.getElementById('scenesReadySection');
     if (scenesReadySection) {
       scenesReadySection.style.display = showImagePanel ? '' : 'none';
+
+      // Character reference UI
+      const charPreview = document.getElementById('refCharPreview');
+      const charThumb = document.getElementById('refCharThumb');
+      const charStatus = document.getElementById('refCharStatus');
+      const deleteCharBtn = document.getElementById('deleteRefCharBtn');
+      if (p.reference_character_path) {
+        if (charPreview) charPreview.style.display = '';
+        if (charThumb) charThumb.src = `/api/projects/${p.id}/reference-character?t=${Date.now()}`;
+        if (charStatus) { charStatus.textContent = '✅'; charStatus.style.color = '#2ecc71'; }
+        if (deleteCharBtn) deleteCharBtn.style.display = '';
+      } else {
+        if (charPreview) charPreview.style.display = 'none';
+        if (charStatus) { charStatus.textContent = ''; charStatus.style.color = ''; }
+        if (deleteCharBtn) deleteCharBtn.style.display = 'none';
+      }
+      // Style reference UI
+      const stylePreview = document.getElementById('refStylePreview');
+      const styleThumb = document.getElementById('refStyleThumb');
+      const styleStatus = document.getElementById('refStyleStatus');
+      const deleteStyleBtn = document.getElementById('deleteRefStyleBtn');
+      if (p.reference_style_path) {
+        if (stylePreview) stylePreview.style.display = '';
+        if (styleThumb) styleThumb.src = `/api/projects/${p.id}/reference-style?t=${Date.now()}`;
+        if (styleStatus) { styleStatus.textContent = '✅'; styleStatus.style.color = '#2ecc71'; }
+        if (deleteStyleBtn) deleteStyleBtn.style.display = '';
+      } else {
+        if (stylePreview) stylePreview.style.display = 'none';
+        if (styleStatus) { styleStatus.textContent = ''; styleStatus.style.color = ''; }
+        if (deleteStyleBtn) deleteStyleBtn.style.display = 'none';
+      }
+
       if (showImagePanel) {
         const doneImgs = chunks.filter(c => c.image_path).length;
         const label = document.getElementById('scenesReadyLabel');
@@ -447,9 +464,9 @@ async function refreshDetail(projectId) {
         if (isGeneratingImages) {
           if (label) label.textContent = `🎨 Generando escena ${doneImgs} de ${chunks.length}…`;
           if (progressCount) { progressCount.style.display = ''; progressCount.textContent = `${doneImgs} de ${chunks.length} escenas completadas`; }
-          if (generateBtn) { generateBtn.style.display = ''; generateBtn.disabled = true; generateBtn.textContent = '⏳ Generando con Seedream…'; }
+          if (generateBtn) { generateBtn.style.display = ''; generateBtn.disabled = true; generateBtn.textContent = `⏳ Generando con ${_imgProviderName()}…`; }
           if (continueBtn) continueBtn.style.display = 'none';
-          if (hint) hint.textContent = 'Replicate Seedream está procesando cada escena. Puedes seguir viendo su progreso en vivo minimizando esta ventana.';
+          if (hint) hint.textContent = 'Google Imagen 4 Fast está procesando cada escena. Puedes seguir viendo su progreso en vivo minimizando esta ventana.';
         } else if (isImagesReady) {
           const hasErrors = chunks.some(c => c.status === 'error');
           const doneVideos = chunks.filter(c => c.video_path).length;
@@ -472,7 +489,7 @@ async function refreshDetail(projectId) {
           if (continueBtn) continueBtn.style.display = 'none';
           if (hint) hint.textContent = hasErrors
             ? 'Algunas escenas fallaron. Puedes reintentar las fallidas individualmente.'
-            : '✅ Imágenes y videos listos con Genaipro Veo. Motion prompts generados para ajuste manual.';
+            : `✅ Imágenes listas con ${_imgProviderName()}. Motion prompts generados para ajuste manual.`;
 
           // "Regenerar TODAS" button
           let regenAllBtn = document.getElementById('regenAllGenaipro');
@@ -481,23 +498,40 @@ async function refreshDetail(projectId) {
             regenAllBtn.id = 'regenAllGenaipro';
             regenAllBtn.className = 'btn btn-warning btn-sm';
             regenAllBtn.style.marginTop = '8px';
-            regenAllBtn.textContent = '⚠️ Regenerar TODAS las imágenes con Genaipro';
+            regenAllBtn.textContent = '⚠️ Regenerar TODAS las imágenes';
             regenAllBtn.onclick = regenerateAllGenaipro;
             hint.parentNode.insertBefore(regenAllBtn, hint.nextSibling);
           }
           regenAllBtn.style.display = '';
 
-          // Show Meta AI Automation Block (kept for manual animation override)
-          const metaSection = document.getElementById('metaAnimationSection');
-          if (metaSection) metaSection.style.display = 'block';
+          // Show Veo3 Animation Block
+          const veo3Section = document.getElementById('veo3AnimationSection');
+          if (veo3Section) {
+            veo3Section.style.display = 'block';
+            const doneVids = chunks.filter(c => c.video_path).length;
+            const progressEl = document.getElementById('animationProgress');
+            if (progressEl) {
+              progressEl.textContent = doneVids > 0 ? `${doneVids} de ${chunks.length} videos animados` : '';
+            }
+            const veoBtn = document.getElementById('startVeo3AnimationBtn');
+            if (veoBtn) {
+              if (doneVids === chunks.length && chunks.length > 0) {
+                veoBtn.textContent = '✅ Todas las escenas animadas';
+                veoBtn.disabled = true;
+              } else if (doneVids > 0) {
+                veoBtn.textContent = `🎬 Animar ${chunks.length - doneVids} escenas restantes`;
+                veoBtn.disabled = false;
+              }
+            }
+          }
         }
         else {
           // scenes_ready — ready to generate
           if (label) label.textContent = `✅ ${chunks.length} escenas listas para generar`;
           if (progressCount) progressCount.style.display = 'none';
-          if (generateBtn) { generateBtn.style.display = ''; generateBtn.disabled = false; generateBtn.textContent = '🎨 Generar Imágenes + Video (Genaipro)'; }
+          if (generateBtn) { generateBtn.style.display = ''; generateBtn.disabled = false; generateBtn.textContent = `🎨 Generar Imágenes (${_imgProviderName()})`; }
           if (continueBtn) continueBtn.style.display = 'none';
-          if (hint) hint.textContent = 'Gemini generará un prompt visual por escena, luego Genaipro Veo creará la imagen y el clip de video (16:9).';
+          if (hint) hint.textContent = `Gemini generará un prompt visual por escena, luego ${_imgProviderName()} creará la imagen (16:9).`;
         }
       }
     }
@@ -515,7 +549,9 @@ async function refreshDetail(projectId) {
 
     // ── Stop polling when in stable state ─────────────────────────────────
     if (['done', 'error', 'awaiting_approval', 'awaiting_voice_config', 'awaiting_audio_approval', 'audio_approved', 'scenes_ready', 'images_ready'].includes(p.status)) {
-      stopPolling();
+      // Keep polling while Veo3 animation is running (videos still being generated)
+      const animating = p.status === 'images_ready' && chunks.some(c => c.image_path && !c.video_path);
+      if (!animating) stopPolling();
     }
   } catch (e) {
     console.error('refreshDetail error:', e);
@@ -611,8 +647,9 @@ async function loadSettingsPage() {
 
   const masked = '••••••••';
   const fields = [
-    'anthropic_api_key', 'genaipro_api_key', 'replicate_api_key', 'grok_api_key',
-    'pexels_api_key', 'pixabay_api_key',
+    'anthropic_api_key', 'genaipro_api_key', 'pollinations_api_key', 'wavespeed_api_key',
+    'google_api_key', 'pexels_api_key', 'pixabay_api_key',
+    'image_provider',
     'default_tts_provider', 'default_tts_voice_id', 'default_tts_model_id',
     'default_tts_speed', 'default_tts_stability', 'default_tts_similarity', 'default_tts_style',
     'default_video_mode', 'default_image_interval',
@@ -649,12 +686,25 @@ async function saveSetting(key) {
   }
 }
 
-async function triggerMetaLogin() {
+async function testGenaIproImage() {
+  const resultEl = document.getElementById('genaipro-test-result');
+  resultEl.style.display = 'block';
+  resultEl.textContent = '⏳ Enviando prueba a Genaipro /veo/create-image… (60s timeout)';
   try {
-    const result = await apiFetch('/api/settings/meta-login', { method: 'POST' });
-    showToast(result.message || 'Se abrió la ventana de Meta AI.', 'info');
+    const result = await apiFetch('/api/settings/test-genaipro-image', { method: 'POST' });
+    let txt = `Clave usada: ${result.api_key_suffix}\nPrompt: ${result.test_prompt}\n\n`;
+    for (const r of (result.results || [])) {
+      txt += `\n── ${r.strategy} ──\n`;
+      if (r.error) {
+        txt += `  ERROR: ${r.error}\n`;
+      } else {
+        txt += `  HTTP: ${r.http_status}  Content-Type: ${r.content_type}\n`;
+        txt += `  Body:\n${r.body_preview}\n`;
+      }
+    }
+    resultEl.textContent = txt;
   } catch (e) {
-    showToast('Error: ' + e.message, 'error');
+    resultEl.textContent = 'Error: ' + e.message;
   }
 }
 
@@ -901,7 +951,7 @@ async function regenerateImageGenaipro(chunkNumber) {
 
   try {
     await apiFetch(`/api/projects/${currentProjectId}/scenes/${chunkNumber}/regenerate-genaipro`, { method: 'POST' });
-    showToast(`⚡ Regenerando imagen de escena #${chunkNumber} con Replicate Seedream…`, 'info');
+    showToast(`⚡ Regenerando imagen de escena #${chunkNumber} con ${_imgProviderName()}…`, 'info');
     stopPolling();
     await refreshDetail(currentProjectId);
     pollInterval = setInterval(() => refreshDetail(currentProjectId), 3000);
@@ -915,18 +965,73 @@ async function regenerateImageGenaipro(chunkNumber) {
 async function regenerateAllGenaipro() {
   if (!currentProjectId) return;
   const btn = document.getElementById('regenAllGenaipro');
-  const origText = btn ? btn.textContent : '⚠️ Regenerar TODAS las imágenes (Seedream)';
+  const origText = btn ? btn.textContent : '⚠️ Regenerar TODAS las imágenes (Imagen 4)';
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Iniciando regeneración masiva…'; }
 
   try {
     await apiFetch(`/api/projects/${currentProjectId}/regenerate-all-genaipro`, { method: 'POST' });
-    showToast('⚡ Regenerando TODAS las imágenes con Replicate Seedream en segundo plano. Revisa los logs.', 'info');
+    showToast(`⚡ Regenerando TODAS las imágenes con ${_imgProviderName()} en segundo plano. Revisa los logs.`, 'info');
     stopPolling();
     await refreshDetail(currentProjectId);
     pollInterval = setInterval(() => refreshDetail(currentProjectId), 3000);
   } catch (e) {
     showToast('Error: ' + e.message, 'error');
     if (btn) { btn.disabled = false; btn.textContent = origText; }
+  }
+}
+
+// ── Reference Images (Character + Style) ──────────────────────────────────
+async function uploadReferenceCharacter(input) {
+  if (!currentProjectId || !input.files[0]) return;
+  const formData = new FormData();
+  formData.append('file', input.files[0]);
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/reference-character`, {
+      method: 'POST', body: formData, isFormData: true,
+    });
+    showToast('Imagen de personaje subida', 'success');
+    await refreshDetail(currentProjectId);
+  } catch (e) {
+    showToast('Error al subir personaje: ' + e.message, 'error');
+  }
+  input.value = '';
+}
+
+async function deleteReferenceCharacter() {
+  if (!currentProjectId) return;
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/reference-character`, { method: 'DELETE' });
+    showToast('Imagen de personaje eliminada', 'info');
+    await refreshDetail(currentProjectId);
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+  }
+}
+
+async function uploadReferenceStyle(input) {
+  if (!currentProjectId || !input.files[0]) return;
+  const formData = new FormData();
+  formData.append('file', input.files[0]);
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/reference-style`, {
+      method: 'POST', body: formData, isFormData: true,
+    });
+    showToast('Imagen de estilo subida', 'success');
+    await refreshDetail(currentProjectId);
+  } catch (e) {
+    showToast('Error al subir estilo: ' + e.message, 'error');
+  }
+  input.value = '';
+}
+
+async function deleteReferenceStyle() {
+  if (!currentProjectId) return;
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/reference-style`, { method: 'DELETE' });
+    showToast('Imagen de estilo eliminada', 'info');
+    await refreshDetail(currentProjectId);
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
   }
 }
 
@@ -1542,12 +1647,12 @@ async function generateImages() {
   if (!currentProjectId) return;
 
   const btn = document.getElementById('generateImagesBtn');
-  const origText = btn ? btn.textContent : '🎨 Generar Imágenes + Video (Genaipro)';
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Iniciando Genaipro…'; }
+  const origText = btn ? btn.textContent : '🎨 Generar Imágenes';
+  if (btn) { btn.disabled = true; btn.textContent = `⏳ Iniciando ${_imgProviderName()}…`; }
 
   try {
     await apiFetch(`/api/projects/${currentProjectId}/generate-images`, { method: 'POST' });
-    showToast('🎨 Genaipro Veo iniciado — generando imagen + video por escena. Revisa los logs para el progreso.', 'info');
+    showToast(`🎨 ${_imgProviderName()} iniciado — generando imagen por escena. Revisa los logs.`, 'info');
     stopPolling();
     await refreshDetail(currentProjectId);
     pollInterval = setInterval(() => refreshDetail(currentProjectId), 3000);
@@ -1561,15 +1666,15 @@ async function continueWithVideo() {
   showToast('Próximamente — integración con NCA para renderizado de video.', 'info');
 }
 
-async function startMetaAnimation() {
+async function startVeo3Animation() {
   if (!currentProjectId) return;
-  const btn = document.getElementById('generateMetaAnimationBtn');
-  const origText = btn ? btn.textContent : '🎬 Generar Animaciones (Meta AI)';
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Iniciando Automación (Meta AI)...'; }
+  const btn = document.getElementById('startVeo3AnimationBtn');
+  const origText = btn ? btn.textContent : '🎬 Animar con WaveSpeed';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Iniciando WaveSpeed…'; }
 
   try {
     await apiFetch(`/api/projects/${currentProjectId}/start-animation`, { method: 'POST' });
-    showToast('Animación masiva iniciada (Max: 3 pestañas). Mantén abierta la terminal de Python.', 'success');
+    showToast('🎬 Animación con WaveSpeed iniciada (máx. 2 simultáneas). Revisa los logs.', 'success');
     stopPolling();
     await refreshDetail(currentProjectId);
     pollInterval = setInterval(() => refreshDetail(currentProjectId), 5000);
