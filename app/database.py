@@ -81,6 +81,8 @@ def init_db():
         # Migrate: Chunk tables
         for col_def in (
             "ALTER TABLE chunks ADD COLUMN motion_prompt TEXT",
+            "ALTER TABLE chunks ADD COLUMN start_ms INTEGER",
+            "ALTER TABLE chunks ADD COLUMN end_ms INTEGER",
         ):
             try:
                 conn.execute(__import__("sqlalchemy").text(col_def))

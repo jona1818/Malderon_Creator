@@ -226,8 +226,8 @@
               <p class="script-hint" id="scriptHint"></p>
             </div>
             <div class="script-header-actions" id="scriptApprovalControls" style="display:none">
-              <button class="btn btn-danger" onclick="regenerateScript()">
-                🔄 Regenerar
+              <button class="btn btn-ghost" onclick="openEditScriptModal()">
+                ✏️ Editar con IA
               </button>
               <button class="btn btn-success" onclick="approveScript()">
                 ✅ APROBAR Y CONTINUAR
@@ -237,17 +237,17 @@
               ✓ Aprobado
             </span>
           </div>
-          <!-- Chunk size config (solo cuando awaiting_approval) -->
+          <!-- Chunk size config (hidden — kept for JS compatibility) -->
           <div class="chunk-config-bar" id="chunkConfigBar" style="display:none">
-            <label class="chunk-config-label">Tamaño de chunk:</label>
-            <input type="number" id="chunkSizeInput" class="chunk-config-input" value="1500" min="300" max="5000"
-              step="100" oninput="updateChunkPreview()" />
-            <span class="chunk-config-unit">caracteres</span>
-            <span class="chunk-config-preview" id="chunkPreview"></span>
+            <input type="number" id="chunkSizeInput" value="1500" min="300" max="5000" step="100" style="display:none" />
+            <span id="chunkPreview" style="display:none"></span>
           </div>
           <!-- Textarea editable (awaiting_approval) -->
           <textarea id="approvalTextarea" class="approval-textarea" rows="22" placeholder="El script aparecerá aquí…"
-            oninput="updateChunkPreview()" style="display:none"></textarea>
+            oninput="updateChunkPreview(); updateWordCount()" style="display:none"></textarea>
+          <div id="scriptWordCount" class="script-word-count" style="display:none">
+            <span id="wordCountVal">0</span> palabras
+          </div>
           <!-- Lectura (después de aprobación) -->
           <div id="scriptContent" class="script-content" style="display:none"></div>
         </div>
@@ -257,80 +257,78 @@
           <div class="voice-config-header">
             <div class="voice-config-header-text">
               <h2>🎙️ Configuración de Voz</h2>
-              <p class="voice-config-hint">Elige la API de TTS y configura la voz para cada chunk.</p>
-            </div>
-            <div class="voice-config-actions-top">
-              <button class="btn btn-ghost" onclick="testVoice()">
-                🔊 Probar Voz
-              </button>
-              <button class="btn btn-primary" onclick="generateVoiceover()">
-                🎙️ Generar Voiceover Completo
-              </button>
+              <p class="voice-config-hint">Selecciona una voz y configura los parámetros de generación.</p>
             </div>
           </div>
 
           <div class="voice-config-body">
-            <!-- No-key warning (shown when settings has no key for selected provider) -->
-            <div id="voiceNoKeyWarning" class="vconfig-no-key-warning" style="display:none">
-              ⚠️ No hay API key guardada para este proveedor.
-              <a href="#" onclick="showView('settings'); return false;">Configúrala en Settings</a>
+
+            <!-- Voice selector card -->
+            <div class="vconfig-group">
+              <label class="vconfig-label">Voice</label>
+              <div class="voice-card" id="voiceCard" onclick="openVoiceModal()">
+                <div class="voice-card-info">
+                  <div class="voice-card-name" id="voiceCardName">Andrew - Smooth, Smart and Clear</div>
+                  <div class="voice-card-desc" id="voiceCardDesc">Cargando voces…</div>
+                </div>
+                <button class="voice-fav-btn" id="voiceFavBtn" onclick="event.stopPropagation(); toggleFavoriteSelected()" title="Favorito">♡</button>
+              </div>
             </div>
 
-            <!-- Provider selector -->
+            <!-- Model selector -->
             <div class="vconfig-group">
-              <label class="vconfig-label">API de Voz</label>
-              <select id="ttsProvider" class="vconfig-select" onchange="onProviderChange()">
-                <option value="genaipro">Genaipro.vn</option>
-                <option value="elevenlabs">ElevenLabs</option>
-                <option value="openai">OpenAI TTS</option>
+              <label class="vconfig-label">Model</label>
+              <select id="ttsModelId" class="vconfig-select">
+                <option value="eleven_multilingual_v2">Multilingual v2 (recomendado)</option>
+                <option value="eleven_monolingual_v1">Monolingual v1</option>
+                <option value="eleven_turbo_v2">Turbo v2</option>
               </select>
             </div>
 
-            <!-- Voice browser (GenAIPro only) -->
-            <div id="voiceListSection" class="vconfig-voice-list-section" style="display:none">
-              <div class="vconfig-voice-list-header">
-                <label class="vconfig-label">Seleccionar voz</label>
-                <div class="vconfig-voice-list-controls">
-                  <input type="text" id="voiceSearch" class="vconfig-input voice-search-input"
-                    placeholder="Buscar por nombre, género, idioma…" oninput="filterVoices()" />
-                  <button class="btn btn-ghost btn-sm" onclick="loadVoices()">🔃 Cargar voces</button>
+            <!-- Sliders -->
+            <div class="vconfig-sliders-grid">
+              <div class="vconfig-slider-row">
+                <div class="vconfig-slider-header"><label class="vconfig-label">Velocidad</label><span id="ttsSpeedVal" class="vconfig-slider-val">1</span></div>
+                <input type="range" id="ttsSpeed" min="0.7" max="1.2" step="0.05" value="1.0" class="vconfig-range" oninput="document.getElementById('ttsSpeedVal').textContent=parseFloat(this.value).toFixed(2)">
+              </div>
+              <div class="vconfig-slider-row">
+                <div class="vconfig-slider-header"><label class="vconfig-label">Estabilidad</label><span id="ttsStabilityVal" class="vconfig-slider-val">0.5</span></div>
+                <input type="range" id="ttsStability" min="0" max="1" step="0.05" value="0.5" class="vconfig-range" oninput="document.getElementById('ttsStabilityVal').textContent=parseFloat(this.value).toFixed(2)">
+              </div>
+              <div class="vconfig-slider-row">
+                <div class="vconfig-slider-header"><label class="vconfig-label">Similarity</label><span id="ttsSimilarityVal" class="vconfig-slider-val">0.75</span></div>
+                <input type="range" id="ttsSimilarity" min="0" max="1" step="0.05" value="0.75" class="vconfig-range" oninput="document.getElementById('ttsSimilarityVal').textContent=parseFloat(this.value).toFixed(2)">
+              </div>
+              <div class="vconfig-slider-row">
+                <div class="vconfig-slider-header"><label class="vconfig-label">Style</label><span id="ttsStyleVal" class="vconfig-slider-val">0</span></div>
+                <input type="range" id="ttsStyle" min="0" max="1" step="0.05" value="0" class="vconfig-range" oninput="document.getElementById('ttsStyleVal').textContent=parseFloat(this.value).toFixed(2)">
+              </div>
+            </div>
+
+            <!-- Generate button at bottom -->
+            <div style="margin-top: 20px; display:flex; justify-content:flex-end;">
+              <button class="btn btn-primary" onclick="generateVoiceover()">🎙️ Generar Voiceover Completo</button>
+            </div>
+
+            <!-- Chunk info (hidden — kept for JS compatibility) -->
+            <div id="voiceChunksSummary" style="display:none">
+              <span id="voiceChunksInfo"></span>
+              <input type="number" id="resplitInput" value="1500" style="display:none" />
+            </div>
+
+            <!-- Waveform audio player (test preview + complete voiceover) -->
+            <div id="waveformPlayer" class="waveform-player" style="display:none">
+              <div class="wave-player-label" id="wavePlayerLabel">🔊 Vista previa</div>
+              <div class="wave-controls">
+                <button class="wave-btn" id="wavePlayBtn" onclick="toggleWavePlayback()">▶</button>
+                <div class="wave-canvas-wrap">
+                  <canvas id="waveCanvas" class="wave-canvas"></canvas>
+                  <div class="wave-progress-overlay" id="waveProgressOverlay"></div>
                 </div>
-              </div>
-              <div id="voiceList" class="voice-list">
-                <div class="voice-list-empty">Haz clic en "Cargar voces" para ver las disponibles.</div>
-              </div>
-              <div id="selectedVoiceDisplay" class="selected-voice-display" style="display:none">
-                <span class="selected-voice-label">✓ Voz seleccionada:</span>
-                <strong id="selectedVoiceName">—</strong>
+                <span class="wave-time" id="waveTime">0:00 / 0:00</span>
               </div>
             </div>
 
-            <!-- Dynamic provider fields (sliders etc., rendered by JS) -->
-            <div id="ttsProviderFields" class="vconfig-provider-fields"></div>
-
-            <!-- Chunks summary + re-dividir -->
-            <div class="vconfig-chunks-summary" id="voiceChunksSummary" style="display:none">
-              <span id="voiceChunksInfo" class="vconfig-chunks-info"></span>
-              <div class="resplit-bar">
-                <label class="chunk-config-label">Re-dividir en:</label>
-                <input type="number" id="resplitInput" class="chunk-config-input" value="1500" min="300" max="5000"
-                  step="100" />
-                <span class="chunk-config-unit">chars</span>
-                <button class="btn btn-ghost btn-sm" onclick="resplitChunks()">↺ Aplicar</button>
-              </div>
-            </div>
-
-            <!-- Test audio player (hidden until "Probar Voz" is clicked) -->
-            <div id="testAudioContainer" class="vconfig-test-player" style="display:none">
-              <span class="vconfig-test-label">🔊 Vista previa (200 chars):</span>
-              <audio id="testAudio" controls></audio>
-            </div>
-
-            <!-- Complete voiceover player (shown after full generation) -->
-            <div id="voicerCompleteContainer" class="vconfig-complete-player" style="display:none">
-              <span class="vconfig-complete-label">🎵 Voiceover completo:</span>
-              <audio id="voicerCompleteAudio" controls></audio>
-            </div>
           </div>
         </div>
 
@@ -343,7 +341,17 @@
           <p class="voiceover-approval-hint">
             Escucha el audio completo. Si suena bien, aprueba para continuar con la generación de imágenes y video.
           </p>
-          <audio id="voiceoverApprovalAudio" controls class="voiceover-approval-player"></audio>
+          <div id="approvalWavePlayer" class="waveform-player">
+            <div class="wave-controls">
+              <button class="wave-btn" id="approvalWavePlayBtn" onclick="toggleApprovalPlayback()">▶</button>
+              <div class="wave-canvas-wrap">
+                <canvas id="approvalWaveCanvas" class="wave-canvas"></canvas>
+              </div>
+              <span class="wave-time" id="approvalWaveTime">0:00 / 0:00</span>
+            </div>
+          </div>
+          <!-- keep hidden audio element for src setting -->
+          <audio id="voiceoverApprovalAudio" style="display:none"></audio>
           <div class="voiceover-approval-actions">
             <button class="btn btn-ghost" onclick="regenerateVoiceover()">
               🔄 Regenerar Voiceover
@@ -664,7 +672,188 @@
   <!-- ── Toast notifications ──────────────────────────────────────── -->
   <div id="toastContainer" class="toast-container"></div>
 
-  <script src="/static/js/app.js"></script>
+  <!-- ── Edit Script Modal ────────────────────────────────────────── -->
+  <div id="editScriptModal" class="vm-overlay" style="display:none" onclick="if(event.target===this)closeEditScriptModal()">
+    <div class="es-dialog">
+      <div class="es-header">
+        <div>
+          <h2 class="es-title">✏️ Editar guion con IA</h2>
+          <p class="es-hint">Dile a Claude qué cambios hacer en el guion actual.</p>
+        </div>
+        <button class="vm-close-btn" onclick="closeEditScriptModal()">✕</button>
+      </div>
+      <div class="es-body">
+        <label class="es-label">¿Qué quieres cambiar?</label>
+        <textarea id="editScriptPrompt" class="es-textarea" rows="4"
+          placeholder="Ej: Haz el guion de 1.800 palabras. / Cambia el tono a más dramático. / Agrega más detalles en el punto 3."></textarea>
+        <div class="es-examples">
+          <span class="es-ex-label">Sugerencias:</span>
+          <button class="es-example" onclick="setEditPrompt('Haz el guion de 1800 palabras')">1800 palabras</button>
+          <button class="es-example" onclick="setEditPrompt('Haz el guion más corto, de 800 palabras')">Más corto</button>
+          <button class="es-example" onclick="setEditPrompt('Cambia el tono a más dramático y emocionante')">Más dramático</button>
+          <button class="es-example" onclick="setEditPrompt('Mejora el gancho del inicio para que sea más impactante')">Mejor gancho</button>
+        </div>
+      </div>
+      <div class="es-footer">
+        <button class="btn btn-ghost" onclick="closeEditScriptModal()">Cancelar</button>
+        <button class="btn btn-primary" id="editScriptSendBtn" onclick="sendEditScriptPrompt()">
+          <span id="editScriptBtnText">✨ Enviar a Claude</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Voice Selection Modal ─────────────────────────────────────── -->
+  <div id="voiceModal" class="vm-overlay" style="display:none" onclick="if(event.target===this)closeVoiceModal()">
+    <div class="vm-dialog">
+      <div class="vm-header">
+        <h2 class="vm-title">Select Voice</h2>
+        <div class="vm-search-row">
+          <div class="vm-search-wrap">
+            <span class="vm-search-icon">🔍</span>
+            <input type="text" id="vmSearch" class="vm-search" placeholder="Search voices..." oninput="searchVoices(this.value)" />
+          </div>
+          <button class="vm-sort-btn" id="vmTrendingBtn" onclick="sortTrending()" title="Trending">
+            <span>⬇</span> Trending
+          </button>
+          <button class="vm-sort-btn" onclick="openFilterModal()" title="Filters">
+            <span>≡</span> Filters
+          </button>
+          <button class="vm-close-btn" onclick="closeVoiceModal()">✕</button>
+        </div>
+      </div>
+      <div class="vm-body">
+        <div id="vmVoiceList" class="vm-voice-list">
+          <div class="vm-loading">Cargando voces…</div>
+        </div>
+      </div>
+      <!-- Sticky preview bar (bottom of modal) -->
+      <div class="vm-preview-bar" id="vmPreviewBar" style="display:none">
+        <div class="vm-pb-info">
+          <div class="vm-pb-name" id="vmPbName">—</div>
+          <div class="vm-pb-lang" id="vmPbLang"></div>
+        </div>
+        <div class="vm-pb-controls">
+          <button class="vm-pb-back" onclick="seekPreview(-10)" title="-10s">↺<span>10</span></button>
+          <button class="vm-pb-play" id="vmPbPlayBtn" onclick="togglePreviewBarPlayback()">▶</button>
+          <button class="vm-pb-fwd" onclick="seekPreview(10)" title="+10s">↻<span>10</span></button>
+        </div>
+        <div class="vm-pb-wave-wrap">
+          <canvas id="vmPbCanvas" class="vm-pb-canvas" onclick="seekPreviewByClick(event, this)"></canvas>
+          <span class="vm-pb-time-left" id="vmPbTimeLeft">0:00</span>
+          <span class="vm-pb-time-right" id="vmPbTimeRight">0:09</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Voice Filter Modal ─────────────────────────────────────────── -->
+  <div id="voiceFilterModal" class="vm-overlay" style="display:none" onclick="if(event.target===this)closeFilterModal()">
+    <div class="vf-dialog">
+      <div class="vf-header">
+        <h2 class="vf-title">Voice Filters</h2>
+        <button class="vm-close-btn" onclick="closeFilterModal()">✕</button>
+      </div>
+      <div class="vf-body">
+        <div class="vf-row-two">
+          <div class="vf-field">
+            <label class="vf-label">Language</label>
+            <div class="vf-search-wrap">
+              <input type="text" id="vfLanguageInput" class="vf-select vf-search-input"
+                     placeholder="Search language..." autocomplete="off"
+                     oninput="_renderLangDropdown(this.value)"
+                     onfocus="_renderLangDropdown(this.value)"
+                     onblur="setTimeout(_hideLangDropdown, 200)">
+              <ul class="vf-lang-dropdown" id="vfLangDropdown" style="display:none"></ul>
+              <input type="hidden" id="vfLanguage" value="">
+            </div>
+          </div>
+          <div class="vf-field">
+            <label class="vf-label">Accent</label>
+            <select id="vfAccent" class="vf-select"><option value="">Select accent</option></select>
+          </div>
+        </div>
+
+        <div class="vf-field">
+          <label class="vf-label">Category</label>
+          <div class="vf-chips" id="vfCategoryChips">
+            <button class="vf-chip" data-val="narrative_story" onclick="toggleFilterChip(this)">Narrative &amp; Story</button>
+            <button class="vf-chip" data-val="conversational" onclick="toggleFilterChip(this)">Conversational</button>
+            <button class="vf-chip" data-val="characters_animation" onclick="toggleFilterChip(this)">Characters &amp; Animation</button>
+            <button class="vf-chip" data-val="social_media" onclick="toggleFilterChip(this)">Social Media</button>
+            <button class="vf-chip" data-val="entertainment_tv" onclick="toggleFilterChip(this)">Entertainment &amp; TV</button>
+            <button class="vf-chip" data-val="advertisement" onclick="toggleFilterChip(this)">Advertisement</button>
+            <button class="vf-chip" data-val="informative_educational" onclick="toggleFilterChip(this)">Informative &amp; Educational</button>
+          </div>
+        </div>
+
+        <div class="vf-field">
+          <label class="vf-label">Quality</label>
+          <div class="vf-toggle-group">
+            <button class="vf-toggle active" data-group="quality" data-val="" onclick="selectToggle(this)">Any</button>
+            <button class="vf-toggle" data-group="quality" data-val="high" onclick="selectToggle(this)">High Quality</button>
+          </div>
+        </div>
+
+        <div class="vf-field">
+          <label class="vf-label">Gender</label>
+          <div class="vf-toggle-group">
+            <button class="vf-toggle active" data-group="gender" data-val="" onclick="selectToggle(this)">Any</button>
+            <button class="vf-toggle" data-group="gender" data-val="male" onclick="selectToggle(this)">♂ Male</button>
+            <button class="vf-toggle" data-group="gender" data-val="female" onclick="selectToggle(this)">♀ Female</button>
+            <button class="vf-toggle" data-group="gender" data-val="neutral" onclick="selectToggle(this)">Neutral</button>
+          </div>
+        </div>
+
+        <div class="vf-field">
+          <label class="vf-label">Age</label>
+          <div class="vf-toggle-group">
+            <button class="vf-toggle active" data-group="age" data-val="" onclick="selectToggle(this)">Any</button>
+            <button class="vf-toggle" data-group="age" data-val="young" onclick="selectToggle(this)">Young</button>
+            <button class="vf-toggle" data-group="age" data-val="middle aged" onclick="selectToggle(this)">Middle Aged</button>
+            <button class="vf-toggle" data-group="age" data-val="old" onclick="selectToggle(this)">Old</button>
+          </div>
+        </div>
+
+        <div class="vf-field">
+          <label class="vf-label">Notice Period</label>
+          <div class="vf-toggle-group vf-wrap">
+            <button class="vf-toggle active" data-group="notice" data-val="" onclick="selectToggle(this)">Any</button>
+            <button class="vf-toggle" data-group="notice" data-val="30" onclick="selectToggle(this)">30 days</button>
+            <button class="vf-toggle" data-group="notice" data-val="90" onclick="selectToggle(this)">90 days</button>
+            <button class="vf-toggle" data-group="notice" data-val="180" onclick="selectToggle(this)">180 days</button>
+            <button class="vf-toggle" data-group="notice" data-val="365" onclick="selectToggle(this)">1 year</button>
+            <button class="vf-toggle" data-group="notice" data-val="730" onclick="selectToggle(this)">2 years</button>
+          </div>
+        </div>
+
+        <div class="vf-field">
+          <label class="vf-label">Include live moderation <span class="vf-info">ⓘ</span></label>
+          <div class="vf-toggle-group">
+            <button class="vf-toggle active" data-group="livemod" data-val="include" onclick="selectToggle(this)">Include</button>
+            <button class="vf-toggle" data-group="livemod" data-val="exclude" onclick="selectToggle(this)">Exclude</button>
+          </div>
+        </div>
+      </div>
+      <div class="vf-footer">
+        <button class="btn btn-ghost" onclick="resetFilters()">Reset</button>
+        <button class="btn btn-primary" onclick="applyFilters()">Apply Filters</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Generic Confirmation Modal -->
+  <div id="confirmModal" class="confirm-overlay" style="display:none" onclick="if(event.target===this)_confirmCancel()">
+    <div class="confirm-dialog">
+      <p id="confirmModalMsg" class="confirm-msg"></p>
+      <div class="confirm-actions">
+        <button class="btn btn-ghost" onclick="_confirmCancel()">Cancelar</button>
+        <button class="btn btn-primary" id="confirmModalOk" onclick="_confirmOk()">Aceptar</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/app.js?v=20260306d"></script>
 </body>
 
 </html>

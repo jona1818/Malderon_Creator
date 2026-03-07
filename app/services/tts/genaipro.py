@@ -34,6 +34,10 @@ from .base import TTSProvider
 
 BASE_URL = "https://genaipro.vn/api/v1"
 
+# Module-level voice cache: {key → (voices_list, timestamp)}
+_VOICE_CACHE: dict = {}
+_VOICE_CACHE_TTL = 300  # 5 minutes
+
 
 class GenAIProTTS(TTSProvider):
     name = "genaipro"
@@ -41,25 +45,127 @@ class GenAIProTTS(TTSProvider):
     # ── Public helpers ────────────────────────────────────────────────────────
 
     @staticmethod
-    def list_voices(api_key: str, search: str = "", gender: str = "", language: str = "") -> list:
-        """GET /labs/voices — returns list of available voice dicts."""
-        params: dict = {}
-        if search:   params["search"]   = search
-        if gender:   params["gender"]   = gender
-        if language: params["language"] = language
-
-        resp = requests.get(
-            f"{BASE_URL}/labs/voices",
-            headers={"Authorization": f"Bearer {api_key}"},
-            params=params,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        # API may return a list directly or wrap it
+    def _extract_voices(data: object) -> list:
+        """Pull the voices list out of whatever shape the API returns."""
         if isinstance(data, list):
             return data
-        return data.get("voices") or data.get("data") or data.get("items") or []
+        if isinstance(data, dict):
+            for key in ("voices", "data", "items", "results", "list"):
+                if isinstance(data.get(key), list):
+                    return data[key]
+        return []
+
+    @staticmethod
+    def _next_cursor(data: dict) -> str:
+        """Return the next-page token/cursor from a paginated response, or ''."""
+        if not isinstance(data, dict):
+            return ""
+        # cursor-style
+        for key in ("next_cursor", "next_page_token", "cursor", "next"):
+            val = data.get(key)
+            if val and isinstance(val, str):
+                return val
+        # last_item_id style (ElevenLabs shared-voices)
+        val = data.get("last_item_id")
+        if val:
+            return str(val)
+        return ""
+
+    @staticmethod
+    def _has_more(data: dict) -> bool:
+        """Return True if the API signals there are more pages."""
+        if not isinstance(data, dict):
+            return False
+        # explicit has_more flag
+        if isinstance(data.get("has_more"), bool):
+            return data["has_more"]
+        # numeric total vs fetched
+        total = data.get("total") or data.get("total_count") or data.get("count")
+        if total is not None:
+            fetched = len(GenAIProTTS._extract_voices(data))
+            return int(total) > fetched
+        return False
+
+    @staticmethod
+    def list_voices(api_key: str, search: str = "", gender: str = "", language: str = "") -> list:
+        """Fetch ALL voices from /labs/voices, following pagination if present."""
+        cache_key = f"{api_key}|{search}|{gender}|{language}"
+        cached = _VOICE_CACHE.get(cache_key)
+        if cached:
+            voices, ts = cached
+            if time.time() - ts < _VOICE_CACHE_TTL:
+                print(f"[GenAIPro] list_voices: cache hit ({len(voices)} voices)")
+                return voices
+
+        headers = {"Authorization": f"Bearer {api_key}"}
+        base_params: dict = {}
+        if search:   base_params["search"]    = search
+        if gender:   base_params["gender"]    = gender
+        if language: base_params["language"]  = language
+
+        all_voices: list = []
+        page_size = 100          # large pages to minimise round-trips
+        next_page = None         # None = first request (no page param); then 2, 3, ...
+        cursor = ""
+        MAX_PAGES = 50
+
+        for _ in range(MAX_PAGES):
+            params = {**base_params, "page_size": page_size}
+            if next_page is not None:
+                params["page"] = next_page
+            if cursor:
+                params["cursor"]       = cursor
+                params["next_cursor"]  = cursor
+                params["last_item_id"] = cursor
+                params["after"]        = cursor
+
+            resp = requests.get(
+                f"{BASE_URL}/labs/voices",
+                headers=headers,
+                params=params,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            batch = GenAIProTTS._extract_voices(data)
+            if not batch:
+                break
+
+            all_voices.extend(batch)
+            print(f"[GenAIPro] list_voices page={next_page!r}: got {len(batch)} voices (total: {len(all_voices)})")
+
+            if isinstance(data, list):
+                if len(batch) < page_size:
+                    break
+                next_page = (next_page or 1) + 1
+            elif isinstance(data, dict):
+                next_cur = GenAIProTTS._next_cursor(data)
+                has_more = GenAIProTTS._has_more(data)
+                if next_cur and next_cur != cursor:
+                    cursor = next_cur
+                    next_page = (next_page or 1) + 1
+                elif has_more:
+                    cursor = ""
+                    next_page = (next_page or 1) + 1
+                else:
+                    break
+            else:
+                break
+
+        # De-duplicate by voice_id
+        seen: set = set()
+        unique: list = []
+        for v in all_voices:
+            vid = v.get("voice_id") or v.get("id") or ""
+            if vid and vid in seen:
+                continue
+            seen.add(vid)
+            unique.append(v)
+
+        print(f"[GenAIPro] list_voices: returning {len(unique)} unique voices")
+        _VOICE_CACHE[cache_key] = (unique, time.time())
+        return unique
 
     # ── TTSProvider interface ─────────────────────────────────────────────────
 

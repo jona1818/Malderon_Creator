@@ -210,11 +210,14 @@ async function refreshDetail(projectId) {
           if (sizeInput && p.target_chunk_size) sizeInput.value = p.target_chunk_size;
           updateChunkPreview();
         }
+        updateWordCount();
       } else {
         // — Read-only mode —
         scriptSection.classList.remove('script-awaiting');
         approvalTextarea.dataset.edited = '';
         approvalTextarea.style.display = 'none';
+        const wcContainer = document.getElementById('scriptWordCount');
+        if (wcContainer) wcContainer.style.display = 'none';
         scriptContent.style.display = '';
         scriptContent.textContent = p.script_final || p.script;
         scriptApprovalControls.style.display = 'none';
@@ -241,26 +244,20 @@ async function refreshDetail(projectId) {
         if (resplitInput) resplitInput.value = p.target_chunk_size || 1500;
       }
 
-      if (p.tts_provider) {
-        const sel = document.getElementById('ttsProvider');
-        if (sel) sel.value = p.tts_provider;
-      }
-      onProviderChange();
-
       // Restore saved voice selection
-      if (p.tts_voice_id && !_selectedVoiceId) {
-        _selectedVoiceId = p.tts_voice_id;
+      if (p.tts_voice_id && !_selectedVoice.voice_id) {
         let voiceName = p.tts_voice_id;
+        let voiceDesc = '';
         try {
           const cfg = JSON.parse(p.tts_config || '{}');
           if (cfg.voice_name) voiceName = cfg.voice_name;
         } catch (_) { }
-        _selectedVoiceName = voiceName;
-        const display = document.getElementById('selectedVoiceDisplay');
-        const nameEl = document.getElementById('selectedVoiceName');
-        if (nameEl) nameEl.textContent = voiceName;
-        if (display) display.style.display = '';
+        _selectedVoice = { ..._selectedVoice, voice_id: p.tts_voice_id, name: voiceName, description: voiceDesc };
+        updateVoiceCard();
       }
+
+      // Load voices if not yet loaded
+      if (!_allVoices.length) initVoiceConfig();
     } else {
       voiceConfigSection.style.display = 'none';
     }
@@ -280,14 +277,12 @@ async function refreshDetail(projectId) {
     if (approvalSection && hasVoiceover) {
       approvalSection.style.display = '';
 
-      // Load audio player (set src only once)
-      const approvalAudio = document.getElementById('voiceoverApprovalAudio');
-      if (approvalAudio) {
-        const audioUrl = `/api/projects/${p.id}/voiceover/audio`;
-        if (approvalAudio.dataset.src !== audioUrl) {
-          approvalAudio.src = audioUrl;
-          approvalAudio.dataset.src = audioUrl;
-        }
+      // Load waveform player for approval section
+      const approvalWaveCanvas = document.getElementById('approvalWaveCanvas');
+      const audioUrl = `/api/projects/${p.id}/voiceover/audio?t=${new Date(p.updated_at).getTime() || Date.now()}`;
+      if (approvalWaveCanvas && approvalWaveCanvas.dataset.src !== audioUrl) {
+        approvalWaveCanvas.dataset.src = audioUrl;
+        fetch(audioUrl).then(r => r.blob()).then(blob => renderWaveformPlayer(blob, 'approval')).catch(() => {});
       }
 
       // Show approve/regenerate buttons only when pending approval
@@ -337,6 +332,19 @@ async function refreshDetail(projectId) {
         const text = c.scene_text || '';
         const preview = text.length > 100 ? text.slice(0, 100) + '…' : text;
         const chars = text.length.toLocaleString('es-ES');
+
+        // Timing info from start_ms / end_ms
+        let timeHtml = '';
+        if (c.start_ms != null && c.end_ms != null) {
+          const fmtTime = (ms) => {
+            const totalSec = Math.floor(ms / 1000);
+            const m = Math.floor(totalSec / 60);
+            const s = totalSec % 60;
+            return `${m}:${String(s).padStart(2, '0')}`;
+          };
+          const durSec = ((c.end_ms - c.start_ms) / 1000).toFixed(1);
+          timeHtml = `<span class="chunk-card-time">${fmtTime(c.start_ms)} — ${fmtTime(c.end_ms)}</span><span class="chunk-card-dur">${durSec}s</span>`;
+        }
 
         // Image thumbnail — use the dedicated API endpoint to avoid Windows path issues
         let imgHtml = '';
@@ -397,6 +405,7 @@ async function refreshDetail(projectId) {
             ${c.image_path ? '<span class="chunk-img-badge">🖼️</span>' : ''}
             <span class="chunk-card-preview">${escHtml(preview)}</span>
             <span class="chunk-card-chars">${chars} chars</span>
+            ${timeHtml}
             <span class="chunk-card-status ${c.status}">${c.status}</span>
             <span class="chunk-card-toggle" id="toggle-${c.chunk_number}">▼</span>
           </div>
@@ -1132,7 +1141,7 @@ async function resplitChunks() {
 
 async function regenerateScript() {
   if (!currentProjectId) return;
-  if (!confirm('¿Regenerar el script desde el outline actual? Se perderá el script actual.')) return;
+  if (!await showConfirm('¿Regenerar el script desde el outline actual? Se perderá el script actual.')) return;
   try {
     const ta = document.getElementById('approvalTextarea');
     ta.dataset.edited = '';
@@ -1147,9 +1156,75 @@ async function regenerateScript() {
   }
 }
 
+// ── Edit Script Modal ──────────────────────────────────────────────────────
+
+function openEditScriptModal() {
+  const modal = document.getElementById('editScriptModal');
+  if (!modal) return;
+  modal.style.display = '';
+  const ta = document.getElementById('editScriptPrompt');
+  if (ta) { ta.value = ''; ta.focus(); }
+}
+
+function closeEditScriptModal() {
+  const modal = document.getElementById('editScriptModal');
+  if (modal) modal.style.display = 'none';
+}
+
+function setEditPrompt(text) {
+  const ta = document.getElementById('editScriptPrompt');
+  if (ta) { ta.value = text; ta.focus(); }
+}
+
+async function sendEditScriptPrompt() {
+  if (!currentProjectId) return;
+  const ta = document.getElementById('editScriptPrompt');
+  const prompt = ta?.value?.trim();
+  if (!prompt) { showToast('Escribe una instrucción primero.', 'error'); return; }
+
+  const btn = document.getElementById('editScriptSendBtn');
+  const btnText = document.getElementById('editScriptBtnText');
+  if (btn) btn.disabled = true;
+  if (btnText) btnText.textContent = '⏳ Procesando…';
+
+  try {
+    const data = await apiFetch(`/api/projects/${currentProjectId}/edit-script`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt }),
+    });
+    const scriptTA = document.getElementById('approvalTextarea');
+    if (scriptTA) {
+      scriptTA.value = data.script || '';
+      scriptTA.dataset.edited = '1';
+      updateChunkPreview();
+      updateWordCount();
+    }
+    closeEditScriptModal();
+    showToast('Guion actualizado por Claude ✓', 'success');
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+    if (btnText) btnText.textContent = '✨ Enviar a Claude';
+  }
+}
+
+// ── Word count ─────────────────────────────────────────────────────────────
+
+function updateWordCount() {
+  const ta = document.getElementById('approvalTextarea');
+  const countEl = document.getElementById('wordCountVal');
+  const container = document.getElementById('scriptWordCount');
+  if (!ta || !countEl) return;
+  const words = ta.value.trim() ? ta.value.trim().split(/\s+/).length : 0;
+  countEl.textContent = words.toLocaleString();
+  if (container) container.style.display = ta.style.display === 'none' ? 'none' : '';
+}
+
 // ── Actions ───────────────────────────────────────────────────────────────
 async function deleteProject(id) {
-  if (!confirm('¿Borrar este proyecto? Esta acción es irreversible.')) return;
+  if (!await showConfirm('¿Borrar este proyecto? Esta acción es irreversible.', 'Borrar')) return;
   try {
     await apiFetch(`/api/projects/${id}`, { method: 'DELETE' });
     showToast('Proyecto borrado', 'info');
@@ -1203,6 +1278,28 @@ function escHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
+// ── Generic Confirm Modal ─────────────────────────────────────────────────
+let _confirmResolve = null;
+
+function showConfirm(message, okLabel = 'Aceptar') {
+  return new Promise(resolve => {
+    _confirmResolve = resolve;
+    document.getElementById('confirmModalMsg').textContent = message;
+    document.getElementById('confirmModalOk').textContent = okLabel;
+    document.getElementById('confirmModal').style.display = 'flex';
+  });
+}
+
+function _confirmOk() {
+  document.getElementById('confirmModal').style.display = 'none';
+  if (_confirmResolve) { _confirmResolve(true); _confirmResolve = null; }
+}
+
+function _confirmCancel() {
+  document.getElementById('confirmModal').style.display = 'none';
+  if (_confirmResolve) { _confirmResolve(false); _confirmResolve = null; }
+}
+
 function showToast(message, type = 'info', duration = 4000) {
   const container = document.getElementById('toastContainer');
   const toast = document.createElement('div');
@@ -1217,284 +1314,619 @@ function showToast(message, type = 'info', duration = 4000) {
 
 // ── Voice Config ──────────────────────────────────────────────────────────
 
-// Voice browser state (GenAIPro)
-let _allVoices = [];
-let _selectedVoiceId = '';
-let _selectedVoiceName = '';
+// ── State ──────────────────────────────────────────────────────────────────
+let _allVoices = [];       // raw from API
+let _filteredVoices = [];  // after search + filters
+let _selectedVoice = { voice_id: '', name: 'Andrew - Smooth, Smart and Clear', description: '', language: '', accent: '', gender: '', age: '', category: '', preview_url: '' };
+let _favorites = new Set(JSON.parse(localStorage.getItem('voiceFavorites') || '[]'));
+let _activeFilters = {};
+let _trendingOrder = [];   // original API order = trending
+let _previewAudio = null;  // HTMLAudio for voice preview
+let _previewVoiceId = '';  // which voice is currently previewing
 
-/**
- * Per-provider field definitions (sliders / selects shown below the voice section).
- * GenAIPro: voice is selected from the list browser, not a text field.
- */
-const TTS_PROVIDER_FIELDS = {
-  genaipro: [
-    {
-      id: 'model_id', label: 'Modelo', type: 'select',
-      options: [
-        { value: 'eleven_multilingual_v2', label: 'Multilingual v2 (recomendado)' },
-        { value: 'eleven_monolingual_v1', label: 'Monolingual v1 (inglés)' },
-        { value: 'eleven_turbo_v2', label: 'Turbo v2 (rápido)' },
-      ],
-      default: 'eleven_multilingual_v2',
-    },
-    { id: 'speed', label: 'Velocidad', type: 'range', min: 0.7, max: 1.2, step: 0.05, default: 1.0 },
-    { id: 'stability', label: 'Estabilidad', type: 'range', min: 0, max: 1, step: 0.05, default: 0.5 },
-    { id: 'similarity', label: 'Similarity', type: 'range', min: 0, max: 1, step: 0.05, default: 0.75 },
-    { id: 'style', label: 'Style', type: 'range', min: 0, max: 1, step: 0.05, default: 0.0 },
-  ],
-  elevenlabs: [
-    { id: 'voice_id', label: 'Voice ID', type: 'text', placeholder: 'Ej: EXAVITQu4vr4xnSDxMaL', default: '', fullWidth: true },
-    {
-      id: 'model_id', label: 'Modelo', type: 'select',
-      options: [
-        { value: 'eleven_multilingual_v2', label: 'Multilingual v2 (recomendado)' },
-        { value: 'eleven_monolingual_v1', label: 'Monolingual v1 (inglés)' },
-        { value: 'eleven_turbo_v2', label: 'Turbo v2 (rápido)' },
-      ],
-      default: 'eleven_multilingual_v2',
-    },
-    { id: 'stability', label: 'Estabilidad', type: 'range', min: 0, max: 1, step: 0.05, default: 0.5 },
-    { id: 'similarity', label: 'Similarity Boost', type: 'range', min: 0, max: 1, step: 0.05, default: 0.75 },
-  ],
-  openai: [
-    {
-      id: 'voice', label: 'Voz', type: 'select',
-      options: [
-        { value: 'alloy', label: 'Alloy (neutral)' },
-        { value: 'echo', label: 'Echo (masculino)' },
-        { value: 'fable', label: 'Fable (expresivo)' },
-        { value: 'onyx', label: 'Onyx (profundo)' },
-        { value: 'nova', label: 'Nova (femenino)' },
-        { value: 'shimmer', label: 'Shimmer (suave)' },
-      ],
-      default: 'alloy',
-    },
-    {
-      id: 'model', label: 'Modelo', type: 'select',
-      options: [
-        { value: 'tts-1', label: 'TTS-1 (rápido)' },
-        { value: 'tts-1-hd', label: 'TTS-1-HD (alta calidad)' },
-      ],
-      default: 'tts-1',
-    },
-    { id: 'speed', label: 'Velocidad', type: 'range', min: 0.25, max: 4.0, step: 0.05, default: 1.0, fullWidth: true },
-  ],
+// ── Waveform player state ──────────────────────────────────────────────────
+let _waveAudio = null;      // HTMLAudio element
+let _waveCtx = null;        // AudioContext
+let _waveAnalyser = null;
+let _waveBuffer = null;     // decoded AudioBuffer
+let _waveRafId = null;
+let _waveMode = 'test';     // 'test' | 'approval'
+let _approvalWaveAudio = null;
+let _approvalWaveBuffer = null;
+let _approvalRafId = null;
+
+// ── Language code → full name map ──────────────────────────────────────────
+const LANG_NAMES = {
+  af:'Afrikaans', ar:'Arabic', bg:'Bulgarian', bn:'Bengali', ca:'Catalan',
+  cs:'Czech', cy:'Welsh', da:'Danish', de:'German', el:'Greek',
+  en:'English', es:'Spanish', et:'Estonian', fa:'Persian', fi:'Finnish',
+  fil:'Filipino', fr:'French', gl:'Galician', gu:'Gujarati', he:'Hebrew',
+  hi:'Hindi', hr:'Croatian', hu:'Hungarian', hy:'Armenian', id:'Indonesian',
+  is:'Icelandic', it:'Italian', ja:'Japanese', ka:'Georgian', kn:'Kannada',
+  ko:'Korean', lt:'Lithuanian', lv:'Latvian', mk:'Macedonian', ml:'Malayalam',
+  mr:'Marathi', ms:'Malay', mt:'Maltese', nl:'Dutch', no:'Norwegian',
+  pa:'Punjabi', pl:'Polish', pt:'Portuguese', ro:'Romanian', ru:'Russian',
+  sk:'Slovak', sl:'Slovenian', sq:'Albanian', sr:'Serbian', sv:'Swedish',
+  sw:'Swahili', ta:'Tamil', te:'Telugu', th:'Thai', tl:'Filipino',
+  tr:'Turkish', uk:'Ukrainian', ur:'Urdu', vi:'Vietnamese',
+  zh:'Chinese', 'zh-cn':'Chinese (Simplified)', 'zh-tw':'Chinese (Traditional)',
 };
 
-function onProviderChange() {
-  const provider = document.getElementById('ttsProvider')?.value || 'genaipro';
+let _langOptions = []; // [{code, name}] populated from _allVoices
 
-  // Show or hide the "no API key" warning
-  const warning = document.getElementById('voiceNoKeyWarning');
-  if (warning) {
-    const keyName = _PROVIDER_KEY_MAP[provider] || `${provider}_api_key`;
-    const hasKey = !!_settings[keyName];
-    warning.style.display = hasKey ? 'none' : '';
-  }
-
-  // Show voice list browser only for GenAIPro
-  const voiceListSection = document.getElementById('voiceListSection');
-  if (voiceListSection) voiceListSection.style.display = provider === 'genaipro' ? '' : 'none';
-
-  const container = document.getElementById('ttsProviderFields');
-  if (!container) return;
-
-  const fields = TTS_PROVIDER_FIELDS[provider] || [];
-  container.innerHTML = '';
-
-  if (fields.length === 0) return;
-
-  // Provider label
-  const badge = document.createElement('div');
-  badge.className = 'vconfig-provider-badge';
-  badge.textContent = `Opciones de ${provider}`;
-  container.appendChild(badge);
-
-  fields.forEach(f => {
-    const group = document.createElement('div');
-    group.className = `vconfig-group${f.fullWidth ? ' full' : ''}`;
-
-    const label = document.createElement('label');
-    label.className = 'vconfig-label';
-    label.textContent = f.label;
-    group.appendChild(label);
-
-    if (f.type === 'text') {
-      const inp = document.createElement('input');
-      inp.type = 'text';
-      inp.id = `tts_${f.id}`;
-      inp.className = 'vconfig-input';
-      inp.placeholder = f.placeholder || '';
-      inp.value = f.default || '';
-      group.appendChild(inp);
-
-    } else if (f.type === 'select') {
-      const sel = document.createElement('select');
-      sel.id = `tts_${f.id}`;
-      sel.className = 'vconfig-select';
-      (f.options || []).forEach(opt => {
-        const o = document.createElement('option');
-        o.value = opt.value;
-        o.textContent = opt.label;
-        if (opt.value === f.default) o.selected = true;
-        sel.appendChild(o);
-      });
-      group.appendChild(sel);
-
-    } else if (f.type === 'range') {
-      const row = document.createElement('div');
-      row.className = 'vconfig-range-row';
-
-      const range = document.createElement('input');
-      range.type = 'range';
-      range.id = `tts_${f.id}`;
-      range.className = 'vconfig-range';
-      range.min = f.min;
-      range.max = f.max;
-      range.step = f.step;
-      range.value = f.default;
-
-      const val = document.createElement('span');
-      val.className = 'vconfig-range-val';
-      val.id = `tts_${f.id}_val`;
-      val.textContent = f.default;
-
-      range.addEventListener('input', () => { val.textContent = parseFloat(range.value).toFixed(2); });
-
-      row.appendChild(range);
-      row.appendChild(val);
-      group.appendChild(row);
-    }
-
-    container.appendChild(group);
-  });
+// ── Voice normalizer ───────────────────────────────────────────────────────
+function normalizeVoice(v) {
+  const labels = v.labels || {};
+  return {
+    voice_id:    v.voice_id || v.id || '',
+    name:        v.name || '',
+    description: v.description || labels.description || '',
+    language:    v.language   || labels.language   || '',
+    accent:      v.accent     || labels.accent      || '',
+    gender:      (v.gender    || labels.gender      || '').toLowerCase(),
+    age:         (v.age       || labels.age         || '').toLowerCase(),
+    category:    (v.category  || labels.use_case    || '').toLowerCase().replace(/[\s&]+/g, '_'),
+    preview_url: v.preview_url || v.preview || '',
+    high_quality: Array.isArray(v.high_quality_base_model_ids) && v.high_quality_base_model_ids.length > 0,
+    notice_period: v.notice_period || labels.notice_period || '',
+    live_moderation: v.live_moderation != null ? !!v.live_moderation : true,
+    _raw: v,
+  };
 }
 
-// ── Voice browser (GenAIPro) ───────────────────────────────────────────────
+// ── Init ───────────────────────────────────────────────────────────────────
+async function initVoiceConfig() {
+  updateVoiceCard();
+  await loadVoicesFromServer();
+}
 
-async function loadVoices() {
-  const apiKey = await _getApiKeyForProvider('genaipro');
-  if (!apiKey) {
-    showToast('⚠️ Configura tu API key de Genaipro en Settings primero.', 'error');
-    return;
-  }
-
-  const btn = document.querySelector('#voiceListSection .btn-ghost');
-  const origText = btn ? btn.textContent : '🔃 Cargar voces';
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Cargando…'; }
-
+async function loadVoicesFromServer() {
   try {
     const data = await apiFetch('/api/tts/voices', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tts_provider: 'genaipro', tts_api_key: apiKey }),
+      body: JSON.stringify({ tts_provider: 'genaipro', tts_api_key: '' }),
     });
-    _allVoices = data.voices || [];
-    renderVoiceList(_allVoices);
-    showToast(`${_allVoices.length} voces cargadas ✓`, 'success');
+    const raw = data.voices || [];
+    _allVoices = raw.map(normalizeVoice);
+    _trendingOrder = _allVoices.map((_, i) => i);
+
+    if (!_selectedVoice.voice_id) {
+      const andrew = _allVoices.find(v => v.name.toLowerCase().includes('andrew'));
+      const def = andrew || _allVoices[0];
+      if (def) _selectedVoice = def;
+    }
+    updateVoiceCard();
+    _filteredVoices = [..._allVoices];
+    populateFilterDropdowns();
   } catch (e) {
-    showToast('Error cargando voces: ' + e.message, 'error');
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = origText; }
+    console.warn('Could not load voices:', e.message);
   }
 }
 
-function filterVoices() {
-  const q = (document.getElementById('voiceSearch')?.value || '').toLowerCase();
-  const filtered = q
-    ? _allVoices.filter(v =>
-      (v.name || '').toLowerCase().includes(q) ||
-      (v.gender || '').toLowerCase().includes(q) ||
-      (v.accent || '').toLowerCase().includes(q) ||
-      (v.language || '').toLowerCase().includes(q)
-    )
-    : _allVoices;
-  renderVoiceList(filtered);
+function populateFilterDropdowns() {
+  const langs = [...new Set(_allVoices.map(v => v.language).filter(Boolean))].sort();
+  _langOptions = langs.map(code => ({ code, name: LANG_NAMES[code] || code }));
+  _langOptions.sort((a, b) => a.name.localeCompare(b.name));
+  _updateAccentDropdown(''); // show all accents initially
 }
 
-function renderVoiceList(voices) {
-  const list = document.getElementById('voiceList');
-  if (!list) return;
+function _renderLangDropdown(query) {
+  const dropdown = document.getElementById('vfLangDropdown');
+  if (!dropdown) return;
+  const q = (query || '').toLowerCase().trim();
+  const matches = q
+    ? _langOptions.filter(l => l.name.toLowerCase().includes(q) || l.code.toLowerCase().includes(q))
+    : _langOptions;
+  if (!matches.length) { dropdown.style.display = 'none'; return; }
+  dropdown.innerHTML = matches.map(l =>
+    `<li data-code="${l.code}" onmousedown="_selectLangOption('${l.code}','${l.name.replace(/'/g,"\\'")}')">
+       <span class="vf-lang-name">${l.name}</span>
+       <span class="vf-lang-code">${l.code}</span>
+     </li>`
+  ).join('');
+  dropdown.style.display = 'block';
+}
 
+function _hideLangDropdown() {
+  const dropdown = document.getElementById('vfLangDropdown');
+  if (dropdown) dropdown.style.display = 'none';
+  // If text input doesn't match a selected lang, clear it
+  const input = document.getElementById('vfLanguageInput');
+  const hidden = document.getElementById('vfLanguage');
+  if (input && hidden && !hidden.value) input.value = '';
+}
+
+function _selectLangOption(code, name) {
+  const input = document.getElementById('vfLanguageInput');
+  const hidden = document.getElementById('vfLanguage');
+  if (input) input.value = name;
+  if (hidden) hidden.value = code;
+  _hideLangDropdown();
+  _updateAccentDropdown(code);
+}
+
+function _clearLang() {
+  const input = document.getElementById('vfLanguageInput');
+  const hidden = document.getElementById('vfLanguage');
+  if (input) input.value = '';
+  if (hidden) hidden.value = '';
+  _updateAccentDropdown('');
+}
+
+function _updateAccentDropdown(langCode) {
+  const voices = langCode ? _allVoices.filter(v => v.language === langCode) : _allVoices;
+  const accents = [...new Set(voices.map(v => v.accent).filter(Boolean))].sort();
+  const sel = document.getElementById('vfAccent');
+  if (!sel) return;
+  sel.innerHTML = '<option value="">Select accent</option>';
+  accents.forEach(a => {
+    const o = document.createElement('option');
+    o.value = a;
+    o.textContent = a.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    sel.appendChild(o);
+  });
+}
+
+// ── Voice Card ─────────────────────────────────────────────────────────────
+function updateVoiceCard() {
+  const nameEl = document.getElementById('voiceCardName');
+  const descEl = document.getElementById('voiceCardDesc');
+  const favBtn = document.getElementById('voiceFavBtn');
+  if (nameEl) nameEl.textContent = _selectedVoice.name || '—';
+  if (descEl) descEl.textContent = _selectedVoice.description || (_selectedVoice.language ? `${_selectedVoice.language} · ${_selectedVoice.accent || ''}`.trim().replace(/·\s*$/, '') : 'Sin descripción');
+  if (favBtn) favBtn.textContent = _favorites.has(_selectedVoice.voice_id) ? '♥' : '♡';
+}
+
+function toggleFavoriteSelected() {
+  const vid = _selectedVoice.voice_id;
+  if (!vid) return;
+  if (_favorites.has(vid)) _favorites.delete(vid); else _favorites.add(vid);
+  localStorage.setItem('voiceFavorites', JSON.stringify([..._favorites]));
+  updateVoiceCard();
+  // refresh modal list if open
+  if (document.getElementById('voiceModal')?.style.display !== 'none') renderVoiceModalList(_filteredVoices);
+}
+
+// ── Voice Modal ────────────────────────────────────────────────────────────
+function openVoiceModal() {
+  const modal = document.getElementById('voiceModal');
+  if (!modal) return;
+  modal.style.display = '';
+  const search = document.getElementById('vmSearch');
+  if (search) search.value = '';
+  _filteredVoices = [..._allVoices];
+  renderVoiceModalList(_filteredVoices);
+  if (search) search.focus();
+}
+
+function closeVoiceModal() {
+  const modal = document.getElementById('voiceModal');
+  if (modal) modal.style.display = 'none';
+  stopPreview();
+}
+
+function renderVoiceModalList(voices) {
+  const list = document.getElementById('vmVoiceList');
+  if (!list) return;
   if (!voices.length) {
-    list.innerHTML = '<div class="voice-list-empty">No se encontraron voces.</div>';
+    list.innerHTML = '<div class="vm-empty">No se encontraron voces.</div>';
+    return;
+  }
+  list.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  voices.forEach(v => frag.appendChild(_buildVoiceRow(v)));
+  list.appendChild(frag);
+}
+
+function _buildVoiceRow(v) {
+  const isFav = _favorites.has(v.voice_id);
+  const isSelected = v.voice_id === _selectedVoice.voice_id;
+  const isPreviewing = v.voice_id === _previewVoiceId;
+  const row = document.createElement('div');
+  row.className = 'vm-row' + (isSelected ? ' vm-row--selected' : '') + (isPreviewing ? ' vm-row--previewing' : '');
+  row.dataset.voiceId = v.voice_id;
+
+  const chips = [v.language, v.accent].filter(Boolean).map(c => `<span class="vm-chip">${escHtml(c)}</span>`).join('');
+  const catLabel = v.category ? `<span class="vm-chip vm-chip--cat">${escHtml(categoryLabel(v.category))}</span>` : '';
+
+  row.innerHTML = `
+    <div class="vm-row-main" onclick="previewVoiceRow(${escAttr(JSON.stringify(v))})">
+      <div class="vm-row-name">${escHtml(v.name)}</div>
+      <div class="vm-row-desc">${escHtml(v.description || '')}</div>
+      <div class="vm-row-chips">${chips}${catLabel}</div>
+    </div>
+    <div class="vm-row-actions">
+      <button class="vm-icon-btn vm-icon-btn--select${isSelected ? ' vm-icon-btn--selected' : ''}" title="Seleccionar voz" onclick="event.stopPropagation();selectVoice(${escAttr(JSON.stringify(v))})">↩</button>
+      <button class="vm-icon-btn${isFav ? ' vm-icon-btn--fav' : ''}" title="Favorito" onclick="event.stopPropagation();toggleFavoriteModal('${escHtml(v.voice_id)}',this)">${isFav ? '♥' : '♡'}</button>
+      <button class="vm-icon-btn" title="Copiar Voice ID" onclick="event.stopPropagation();copyVoiceId('${escHtml(v.voice_id)}',this)">📋</button>
+    </div>
+  `;
+  return row;
+}
+
+function categoryLabel(cat) {
+  const MAP = {
+    narrative_story: 'Narrative & Story', conversational: 'Conversational',
+    characters_animation: 'Characters & Animation', social_media: 'Social Media',
+    entertainment_tv: 'Entertainment & TV', advertisement: 'Advertisement',
+    informative_educational: 'Informative & Educational',
+  };
+  return MAP[cat] || cat;
+}
+
+function escAttr(str) { return str.replace(/"/g, '&quot;'); }
+
+function selectVoice(voice) {
+  _selectedVoice = typeof voice === 'string' ? JSON.parse(voice) : voice;
+  updateVoiceCard();
+  closeVoiceModal();
+  showToast(`Voz seleccionada: ${_selectedVoice.name}`, 'success');
+}
+
+// ── Search & Sort ──────────────────────────────────────────────────────────
+let _searchDebounce = null;
+let _serverSearchVersion = 0;  // race-condition guard
+
+function searchVoices(query) {
+  const q = query.toLowerCase().trim();
+  clearTimeout(_searchDebounce);
+
+  if (!q) {
+    _filteredVoices = [..._allVoices];
+    renderVoiceModalList(_filteredVoices);
     return;
   }
 
-  list.innerHTML = '';
-  voices.forEach(v => {
-    const item = document.createElement('div');
-    item.className = 'voice-item' + (v.voice_id === _selectedVoiceId ? ' selected' : '');
-    const tags = [v.gender, v.accent, v.language].filter(Boolean);
-    item.innerHTML = `
-      <div class="voice-item-name">${escHtml(v.name || v.voice_id || '—')}</div>
-      ${tags.length ? `<div class="voice-item-tags">${tags.map(t => `<span class="voice-tag">${escHtml(t)}</span>`).join('')}</div>` : ''}
-    `;
-    item.addEventListener('click', () => selectVoice(v));
-    list.appendChild(item);
-  });
-}
+  // Local filter first
+  const local = _allVoices.filter(v =>
+    v.name.toLowerCase().includes(q) ||
+    v.voice_id.toLowerCase().includes(q) ||
+    (v.description || '').toLowerCase().includes(q)
+  );
 
-function selectVoice(voice) {
-  _selectedVoiceId = voice.voice_id || voice.id || '';
-  _selectedVoiceName = voice.name || _selectedVoiceId;
+  if (local.length > 0) {
+    _filteredVoices = _applyFilterMap(local, _activeFilters);
+    renderVoiceModalList(_filteredVoices);
+    return;
+  }
 
-  const display = document.getElementById('selectedVoiceDisplay');
-  const nameEl = document.getElementById('selectedVoiceName');
-  if (nameEl) nameEl.textContent = _selectedVoiceName;
-  if (display) display.style.display = '';
-
-  renderVoiceList(_allVoices); // re-render to update selected highlight
-}
-
-// ── Voice config collection ───────────────────────────────────────────────
-
-/** Fetch the real (unmasked) API key for a TTS provider from the backend. */
-async function _getApiKeyForProvider(provider) {
-  const keyName = _PROVIDER_KEY_MAP[provider] || `${provider}_api_key`;
-  try {
-    const result = await apiFetch(`/api/settings/raw/${keyName}`);
-    return result.value || '';
-  } catch (e) {
-    return '';
+  // No local results — search server (debounced)
+  if (q.length >= 3) {
+    const list = document.getElementById('vmVoiceList');
+    if (list) list.innerHTML = '<div class="vm-empty">Buscando en servidor...</div>';
+    _searchDebounce = setTimeout(() => _searchVoicesServer(q), 500);
+  } else {
+    renderVoiceModalList([]);
   }
 }
 
-function _collectVoiceConfig() {
-  const provider = document.getElementById('ttsProvider')?.value || 'genaipro';
-  // api_key is resolved asynchronously by callers via _getApiKeyForProvider()
-  const api_key = '';
+async function _searchVoicesServer(query) {
+  const version = ++_serverSearchVersion;
+  console.log('[VoiceSearch] Server search:', query);
+  try {
+    const data = await apiFetch('/api/tts/voices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tts_provider: 'genaipro', tts_api_key: '', search: query }),
+    });
+    // Ignore stale responses
+    if (version !== _serverSearchVersion) return;
 
-  const fields = TTS_PROVIDER_FIELDS[provider] || [];
-  const extraConfig = {};
-  fields.forEach(f => {
-    const el = document.getElementById(`tts_${f.id}`);
-    if (!el) return;
-    if (f.type === 'range') {
-      extraConfig[f.id] = parseFloat(el.value);
-    } else {
-      extraConfig[f.id] = el.value;
+    const raw = data.voices || [];
+    console.log('[VoiceSearch] Server returned:', raw.length, 'voices');
+    if (!raw.length) {
+      const list = document.getElementById('vmVoiceList');
+      if (list) list.innerHTML = '<div class="vm-empty">No se encontraron voces.</div>';
+      return;
     }
-  });
+    const newVoices = raw.map(normalizeVoice);
+    // Merge into _allVoices so subsequent local searches find them
+    for (const v of newVoices) {
+      if (!_allVoices.find(e => e.voice_id === v.voice_id)) {
+        _allVoices.push(v);
+      }
+    }
+    _filteredVoices = newVoices;
+    renderVoiceModalList(_filteredVoices);
+  } catch (e) {
+    console.warn('[VoiceSearch] Server search failed:', e.message);
+    if (version !== _serverSearchVersion) return;
+    const list = document.getElementById('vmVoiceList');
+    if (list) list.innerHTML = '<div class="vm-empty">Error buscando voces.</div>';
+  }
+}
 
-  // For GenAIPro: voice_id comes from the voice browser; for others from a text field
-  let voice_id;
-  if (provider === 'genaipro') {
-    voice_id = _selectedVoiceId || null;
-    // Persist voice name so it can be restored across page loads
-    if (_selectedVoiceName && _selectedVoiceName !== _selectedVoiceId) {
-      extraConfig['voice_name'] = _selectedVoiceName;
+function sortTrending() {
+  _filteredVoices = [..._filteredVoices].sort((a, b) => {
+    const ia = _allVoices.findIndex(v => v.voice_id === a.voice_id);
+    const ib = _allVoices.findIndex(v => v.voice_id === b.voice_id);
+    return ia - ib;
+  });
+  renderVoiceModalList(_filteredVoices);
+}
+
+// ── Favorites ──────────────────────────────────────────────────────────────
+function toggleFavoriteModal(voiceId, btn) {
+  if (_favorites.has(voiceId)) { _favorites.delete(voiceId); btn.textContent = '♡'; btn.classList.remove('vm-icon-btn--fav'); }
+  else { _favorites.add(voiceId); btn.textContent = '♥'; btn.classList.add('vm-icon-btn--fav'); }
+  localStorage.setItem('voiceFavorites', JSON.stringify([..._favorites]));
+  if (_selectedVoice.voice_id === voiceId) updateVoiceCard();
+}
+
+// ── Copy Voice ID ──────────────────────────────────────────────────────────
+function copyVoiceId(voiceId, btn) {
+  navigator.clipboard.writeText(voiceId).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  }).catch(() => showToast('No se pudo copiar', 'error'));
+}
+
+// ── Voice Preview ──────────────────────────────────────────────────────────
+
+// Preview bar state
+let _pbAudio = null;       // HTMLAudio for preview bar
+let _pbVoice = null;       // voice object currently in bar
+let _pbBuffer = null;      // decoded AudioBuffer (for waveform)
+let _pbRafId = null;       // requestAnimationFrame id
+
+function previewVoiceRow(voice) {
+  const v = typeof voice === 'string' ? JSON.parse(voice) : voice;
+  // Toggle: click same voice = pause/play
+  if (_previewVoiceId === v.voice_id && _pbAudio) {
+    if (_pbAudio.paused) { _pbAudio.play().catch(() => {}); }
+    else { _pbAudio.pause(); }
+    return;
+  }
+  stopPreview();
+  if (!v.preview_url) {
+    showToast('Esta voz no tiene muestra de audio disponible.', 'info');
+    return;
+  }
+  _previewVoiceId = v.voice_id;
+  _pbVoice = v;
+  _pbAudio = new Audio(v.preview_url);
+  _pbAudio.crossOrigin = 'anonymous';
+
+  // Update row highlights
+  document.querySelectorAll('.vm-row--previewing').forEach(r => r.classList.remove('vm-row--previewing'));
+  const activeRow = document.querySelector(`.vm-row[data-voice-id="${CSS.escape(v.voice_id)}"]`);
+  if (activeRow) activeRow.classList.add('vm-row--previewing');
+
+  // Show bar immediately (before audio loads)
+  showPreviewBar(v);
+
+  _pbAudio.onplay  = () => { _updatePbBtn(true);  _startPbProgress(); };
+  _pbAudio.onpause = () => { _updatePbBtn(false); cancelAnimationFrame(_pbRafId); };
+  _pbAudio.onended = () => {
+    _updatePbBtn(false);
+    cancelAnimationFrame(_pbRafId);
+    _previewVoiceId = '';
+    document.querySelectorAll('.vm-row--previewing').forEach(r => r.classList.remove('vm-row--previewing'));
+    _drawPbWave(0); // reset to full unplayed
+  };
+
+  _pbAudio.play().catch(e => showToast('No se pudo reproducir preview: ' + e.message, 'error'));
+
+  // Async: fetch + decode for waveform (non-blocking)
+  fetch(v.preview_url)
+    .then(r => r.arrayBuffer())
+    .then(buf => {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      return ctx.decodeAudioData(buf).then(ab => { ctx.close(); return ab; });
+    })
+    .then(ab => { _pbBuffer = ab; _drawPbWave(_pbAudio ? _pbAudio.currentTime / (_pbAudio.duration || 1) : 0); })
+    .catch(() => {}); // waveform is optional, don't break on error
+}
+
+function showPreviewBar(voice) {
+  const bar = document.getElementById('vmPreviewBar');
+  if (!bar) return;
+  bar.style.display = '';
+  const nameEl = document.getElementById('vmPbName');
+  const langEl = document.getElementById('vmPbLang');
+  if (nameEl) nameEl.textContent = voice.name || '—';
+  if (langEl) langEl.textContent = [voice.language, voice.accent].filter(Boolean).join(' · ');
+  _pbBuffer = null; // reset until async decode finishes
+  _drawPbWave(0);
+}
+
+function togglePreviewBarPlayback() {
+  if (!_pbAudio) return;
+  if (_pbAudio.paused) _pbAudio.play().catch(() => {}); else _pbAudio.pause();
+}
+
+function seekPreview(seconds) {
+  if (!_pbAudio || !_pbAudio.duration) return;
+  _pbAudio.currentTime = Math.max(0, Math.min(_pbAudio.duration, _pbAudio.currentTime + seconds));
+}
+
+function seekPreviewByClick(event, canvas) {
+  if (!_pbAudio || !_pbAudio.duration) return;
+  const pct = event.offsetX / canvas.offsetWidth;
+  _pbAudio.currentTime = pct * _pbAudio.duration;
+}
+
+function _updatePbBtn(playing) {
+  const btn = document.getElementById('vmPbPlayBtn');
+  if (btn) btn.textContent = playing ? '⏸' : '▶';
+}
+
+function _startPbProgress() {
+  cancelAnimationFrame(_pbRafId);
+  const tick = () => {
+    if (!_pbAudio || _pbAudio.paused) return;
+    const prog = _pbAudio.duration ? _pbAudio.currentTime / _pbAudio.duration : 0;
+    _drawPbWave(prog);
+    const fmt = s => { const m = Math.floor(s/60); return `${m}:${String(Math.floor(s%60)).padStart(2,'0')}`; };
+    const tl = document.getElementById('vmPbTimeLeft');
+    const tr = document.getElementById('vmPbTimeRight');
+    if (tl) tl.textContent = fmt(_pbAudio.currentTime);
+    if (tr) tr.textContent = fmt(_pbAudio.duration || 0);
+    _pbRafId = requestAnimationFrame(tick);
+  };
+  _pbRafId = requestAnimationFrame(tick);
+}
+
+function _drawPbWave(progress) {
+  const canvas = document.getElementById('vmPbCanvas');
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.offsetWidth || 800;
+  const H = canvas.offsetHeight || 48;
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+
+  const barW = 2;
+  const gap  = 1.5;
+  const cols = Math.floor(W / (barW + gap));
+  const playedColor   = '#6c63ff';
+  const unplayedColor = '#3a3a55';
+
+  if (_pbBuffer) {
+    // Real waveform from decoded audio
+    const data = _pbBuffer.getChannelData(0);
+    const samplesPerCol = Math.ceil(data.length / cols);
+    for (let i = 0; i < cols; i++) {
+      let max = 0;
+      const start = i * samplesPerCol;
+      for (let j = start; j < start + samplesPerCol && j < data.length; j++) {
+        const vv = Math.abs(data[j]);
+        if (vv > max) max = vv;
+      }
+      const barH = Math.max(3, max * H * 0.85);
+      const x = i * (barW + gap);
+      const y = (H - barH) / 2;
+      ctx.fillStyle = (i / cols) < progress ? playedColor : unplayedColor;
+      ctx.beginPath(); ctx.roundRect(x, y, barW, barH, 1); ctx.fill();
     }
   } else {
-    voice_id = extraConfig['voice_id'] || null;
-    if (voice_id !== null) delete extraConfig['voice_id'];
+    // Placeholder: pseudo-random looking waveform
+    const seed = (_pbVoice?.voice_id || 'x').split('').reduce((a,c) => a + c.charCodeAt(0), 0);
+    for (let i = 0; i < cols; i++) {
+      const pseudo = Math.abs(Math.sin((i + seed) * 0.4) * 0.5 + Math.sin((i + seed) * 1.1) * 0.3 + 0.2);
+      const barH = Math.max(3, pseudo * H * 0.85);
+      const x = i * (barW + gap);
+      const y = (H - barH) / 2;
+      ctx.fillStyle = (i / cols) < progress ? playedColor : unplayedColor;
+      ctx.beginPath(); ctx.roundRect(x, y, barW, barH, 1); ctx.fill();
+    }
   }
+}
+
+function stopPreview() {
+  if (_pbAudio) { _pbAudio.pause(); _pbAudio = null; }
+  cancelAnimationFrame(_pbRafId);
+  _previewVoiceId = '';
+  _pbVoice = null;
+  _pbBuffer = null;
+  document.querySelectorAll('.vm-row--previewing').forEach(r => r.classList.remove('vm-row--previewing'));
+  const bar = document.getElementById('vmPreviewBar');
+  if (bar) bar.style.display = 'none';
+}
+
+// ── Filter Modal ───────────────────────────────────────────────────────────
+function openFilterModal() {
+  const modal = document.getElementById('voiceFilterModal');
+  if (modal) modal.style.display = '';
+}
+
+function closeFilterModal() {
+  const modal = document.getElementById('voiceFilterModal');
+  if (modal) modal.style.display = 'none';
+}
+
+function toggleFilterChip(btn) {
+  btn.classList.toggle('vf-chip--active');
+}
+
+function selectToggle(btn) {
+  const group = btn.dataset.group;
+  document.querySelectorAll(`.vf-toggle[data-group="${group}"]`).forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+function applyFilters() {
+  const filters = {};
+
+  // Language (sent to server)
+  const lang = document.getElementById('vfLanguage')?.value;
+  if (lang) filters.language = lang;
+
+  // Accent (client-side)
+  const accent = document.getElementById('vfAccent')?.value;
+  if (accent) filters.accent = accent;
+
+  // Category chips (client-side)
+  const cats = [...document.querySelectorAll('#vfCategoryChips .vf-chip--active')].map(b => b.dataset.val);
+  if (cats.length) filters.categories = cats;
+
+  // Toggle groups
+  const toggleVal = (group) => document.querySelector(`.vf-toggle.active[data-group="${group}"]`)?.dataset.val || '';
+  const quality = toggleVal('quality');
+  if (quality) filters.quality = quality;
+  const gender = toggleVal('gender'); // sent to server
+  if (gender) filters.gender = gender;
+  const age = toggleVal('age');
+  if (age) filters.age = age;
+
+  _activeFilters = filters;
+  const query = document.getElementById('vmSearch')?.value || '';
+  const base = query
+    ? _allVoices.filter(v => v.name.toLowerCase().includes(query.toLowerCase()) || v.voice_id.toLowerCase().includes(query.toLowerCase()))
+    : [..._allVoices];
+  _filteredVoices = _applyFilterMap(base, _activeFilters);
+  renderVoiceModalList(_filteredVoices);
+  closeFilterModal();
+}
+
+function _applyFilterMap(voices, filters) {
+  return voices.filter(v => {
+    if (filters.language && v.language !== filters.language) return false;
+    if (filters.accent && v.accent !== filters.accent) return false;
+    if (filters.categories && filters.categories.length && !filters.categories.includes(v.category)) return false;
+    if (filters.quality === 'high' && !v.high_quality) return false;
+    if (filters.gender && v.gender !== filters.gender) return false;
+    if (filters.age && v.age !== filters.age) return false;
+    return true;
+  });
+}
+
+function resetFilters() {
+  _activeFilters = {};
+  document.querySelectorAll('.vf-chip--active').forEach(b => b.classList.remove('vf-chip--active'));
+  document.querySelectorAll('.vf-toggle').forEach(b => {
+    b.classList.remove('active');
+    if (b.dataset.val === '') b.classList.add('active');
+  });
+  _clearLang();
+  const accentSel = document.getElementById('vfAccent');
+  if (accentSel) accentSel.value = '';
+  _filteredVoices = [..._allVoices];
+  renderVoiceModalList(_filteredVoices);
+  closeFilterModal();
+}
+
+// ── Voice config collection ────────────────────────────────────────────────
+function _collectVoiceConfig() {
+  const modelId  = document.getElementById('ttsModelId')?.value  || 'eleven_multilingual_v2';
+  const speed    = parseFloat(document.getElementById('ttsSpeed')?.value    || '1.0');
+  const stability = parseFloat(document.getElementById('ttsStability')?.value || '0.5');
+  const similarity = parseFloat(document.getElementById('ttsSimilarity')?.value || '0.75');
+  const style    = parseFloat(document.getElementById('ttsStyle')?.value    || '0.0');
+
+  const extraConfig = { model_id: modelId, speed, stability, similarity, style };
+  if (_selectedVoice.name) extraConfig['voice_name'] = _selectedVoice.name;
 
   return {
-    tts_provider: provider,
-    tts_api_key: api_key,
-    tts_voice_id: voice_id || null,
-    tts_config: JSON.stringify(extraConfig),
+    tts_provider:  'genaipro',
+    tts_api_key:   '',
+    tts_voice_id:  _selectedVoice.voice_id || null,
+    tts_config:    JSON.stringify(extraConfig),
   };
 }
 
@@ -1505,13 +1937,6 @@ async function testVoice() {
     showToast('Selecciona una voz primero.', 'error');
     return;
   }
-
-  const apiKey = await _getApiKeyForProvider(cfg.tts_provider);
-  if (!apiKey) {
-    showToast('⚠️ Configura tu API key en Settings primero.', 'error');
-    return;
-  }
-  cfg.tts_api_key = apiKey;
 
   const btn = document.querySelector('.voice-config-actions-top .btn-ghost');
   const origText = btn ? btn.textContent : '🔊 Probar Voz';
@@ -1530,16 +1955,9 @@ async function testVoice() {
     }
 
     const blob = await resp.blob();
-    const url = URL.createObjectURL(blob);
-
-    const container = document.getElementById('testAudioContainer');
-    const audio = document.getElementById('testAudio');
-    if (audio) {
-      if (audio.src && audio.src.startsWith('blob:')) URL.revokeObjectURL(audio.src);
-      audio.src = url;
-      audio.play().catch(() => { });
-    }
-    if (container) container.style.display = '';
+    const label = document.getElementById('wavePlayerLabel');
+    if (label) label.textContent = '🔊 Vista previa (200 chars)';
+    await renderWaveformPlayer(blob, 'test');
     showToast('Vista previa generada ✓', 'success');
   } catch (e) {
     showToast('Error al probar voz: ' + e.message, 'error');
@@ -1556,13 +1974,6 @@ async function generateVoiceover() {
     return;
   }
 
-  const apiKey = await _getApiKeyForProvider(cfg.tts_provider);
-  if (!apiKey) {
-    showToast('⚠️ Configura tu API key en Settings primero.', 'error');
-    return;
-  }
-  cfg.tts_api_key = apiKey;
-
   const btn = document.querySelector('.voice-config-actions-top .btn-primary');
   const origText = btn ? btn.textContent : '🎙️ Generar Voiceover Completo';
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Iniciando…'; }
@@ -1574,8 +1985,6 @@ async function generateVoiceover() {
       body: JSON.stringify(cfg),
     });
     showToast('Generando voiceover… revisa los logs para ver el progreso.', 'info');
-
-    // Status changes to 'processing' — restart polling to track progress
     stopPolling();
     await refreshDetail(currentProjectId);
     pollInterval = setInterval(() => refreshDetail(currentProjectId), 4000);
@@ -1585,11 +1994,123 @@ async function generateVoiceover() {
   }
 }
 
+// ── Waveform Player ────────────────────────────────────────────────────────
+
+async function renderWaveformPlayer(blob, mode) {
+  _waveMode = mode || 'test';
+  const canvasId  = mode === 'approval' ? 'approvalWaveCanvas' : 'waveCanvas';
+  const playBtnId = mode === 'approval' ? 'approvalWavePlayBtn' : 'wavePlayBtn';
+  const timeId    = mode === 'approval' ? 'approvalWaveTime' : 'waveTime';
+  const playerId  = mode === 'approval' ? 'approvalWavePlayer' : 'waveformPlayer';
+
+  const player = document.getElementById(playerId);
+  if (player) player.style.display = '';
+
+  // Decode audio
+  const arrayBuf = await blob.arrayBuffer();
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const audioBuf = await ctx.decodeAudioData(arrayBuf);
+
+  if (mode === 'approval') {
+    _approvalWaveBuffer = audioBuf;
+    if (_approvalWaveAudio) { _approvalWaveAudio.pause(); URL.revokeObjectURL(_approvalWaveAudio.src); }
+    _approvalWaveAudio = new Audio(URL.createObjectURL(blob));
+  } else {
+    _waveBuffer = audioBuf;
+    if (_waveAudio) { _waveAudio.pause(); URL.revokeObjectURL(_waveAudio.src); }
+    _waveAudio = new Audio(URL.createObjectURL(blob));
+  }
+
+  await ctx.close();
+
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const buf = mode === 'approval' ? _approvalWaveBuffer : _waveBuffer;
+  drawWaveformStatic(canvas, buf, 0);
+
+  const audio = mode === 'approval' ? _approvalWaveAudio : _waveAudio;
+  const playBtn = document.getElementById(playBtnId);
+  const timeEl  = document.getElementById(timeId);
+
+  function fmt(s) { const m = Math.floor(s / 60); return `${m}:${String(Math.floor(s % 60)).padStart(2, '0')}`; }
+
+  audio.ontimeupdate = () => {
+    const prog = audio.duration ? audio.currentTime / audio.duration : 0;
+    drawWaveformStatic(canvas, buf, prog);
+    if (timeEl) timeEl.textContent = `${fmt(audio.currentTime)} / ${fmt(audio.duration || 0)}`;
+  };
+  audio.onended = () => { if (playBtn) playBtn.textContent = '▶'; };
+  audio.onplay  = () => { if (playBtn) playBtn.textContent = '⏸'; };
+  audio.onpause = () => { if (playBtn) playBtn.textContent = '▶'; };
+}
+
+function drawWaveformStatic(canvas, audioBuf, progress) {
+  if (!canvas || !audioBuf) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.offsetWidth || 600;
+  const H = canvas.offsetHeight || 64;
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+
+  const data = audioBuf.getChannelData(0);
+  const step = Math.ceil(data.length / W);
+  const barW = 2;
+  const gap  = 1;
+  const cols = Math.floor(W / (barW + gap));
+  const samplesPerCol = Math.ceil(data.length / cols);
+  const playedColor = '#7c3aed';
+  const unplayedColor = '#3f3f46';
+
+  for (let i = 0; i < cols; i++) {
+    let max = 0;
+    const start = i * samplesPerCol;
+    for (let j = start; j < start + samplesPerCol && j < data.length; j++) {
+      const v = Math.abs(data[j]);
+      if (v > max) max = v;
+    }
+    const barH = Math.max(2, max * H * 0.85);
+    const x = i * (barW + gap);
+    const y = (H - barH) / 2;
+    ctx.fillStyle = (i / cols) < progress ? playedColor : unplayedColor;
+    ctx.beginPath();
+    ctx.roundRect(x, y, barW, barH, 1);
+    ctx.fill();
+  }
+}
+
+function toggleWavePlayback() {
+  const audio = _waveAudio;
+  if (!audio) return;
+  if (audio.paused) audio.play().catch(() => {}); else audio.pause();
+}
+
+function toggleApprovalPlayback() {
+  const audio = _approvalWaveAudio;
+  if (!audio) return;
+  if (audio.paused) audio.play().catch(() => {}); else audio.pause();
+}
+
+// Seek on canvas click
+document.addEventListener('click', (e) => {
+  const canvas = e.target;
+  if (canvas.id === 'waveCanvas' && _waveAudio) {
+    const pct = e.offsetX / canvas.offsetWidth;
+    _waveAudio.currentTime = pct * _waveAudio.duration;
+  }
+  if (canvas.id === 'approvalWaveCanvas' && _approvalWaveAudio) {
+    const pct = e.offsetX / canvas.offsetWidth;
+    _approvalWaveAudio.currentTime = pct * _approvalWaveAudio.duration;
+  }
+});
+
 // ── Audio Approval ────────────────────────────────────────────────────────
 
 async function approveAudio() {
   if (!currentProjectId) return;
-  if (!confirm('¿Aprobar el voiceover? Después podrás continuar con la generación de escenas.')) return;
+  if (!await showConfirm('¿Aprobar el voiceover? Después podrás continuar con la generación de escenas.', 'Aprobar')) return;
 
   const btn = document.querySelector('#voiceoverApprovalSection .btn-success');
   const origText = btn ? btn.textContent : '✅ Aprobar Audio';
@@ -1607,7 +2128,7 @@ async function approveAudio() {
 
 async function continueWithScenes() {
   if (!currentProjectId) return;
-  if (!confirm('¿Continuar con la generación de escenas? Se dividirá el SRT en escenas de 5 segundos y se iniciará la generación de video.')) return;
+  if (!await showConfirm('¿Continuar con la generación de escenas? Se dividirá el SRT en escenas de 5 segundos y se iniciará la generación de video.', 'Continuar')) return;
 
   const btn = document.getElementById('voiceoverContinueActions')?.querySelector('button');
   const origText = btn ? btn.textContent : '▶️ Continuar con Escenas';
@@ -1627,7 +2148,7 @@ async function continueWithScenes() {
 
 async function resetToAudioApproved() {
   if (!currentProjectId) return;
-  if (!confirm('¿Reintentar desde audio aprobado? Se limpiarán los chunks con error para que puedas continuar con las escenas.')) return;
+  if (!await showConfirm('¿Reintentar desde audio aprobado? Se limpiarán los chunks con error para que puedas continuar con las escenas.', 'Reintentar')) return;
 
   const btn = document.getElementById('voiceoverRetryActions')?.querySelector('button');
   const origText = btn ? btn.textContent : '🔄 Reintentar desde Audio Aprobado';
@@ -1701,7 +2222,7 @@ async function saveMotionPrompt(chunk_number) {
 
 async function regenerateVoiceover() {
   if (!currentProjectId) return;
-  if (!confirm('¿Descartar el voiceover actual y volver a configurar la voz?')) return;
+  if (!await showConfirm('¿Descartar el voiceover actual y volver a configurar la voz?', 'Descartar')) return;
 
   try {
     await apiFetch(`/api/projects/${currentProjectId}/regenerate-voiceover`, { method: 'POST' });

@@ -12,10 +12,10 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..models import Project, Chunk, ProjectStatus
+from ..models import Project, Chunk, ProjectStatus, AppSetting
 from ..schemas import ProjectCreate, ProjectOut, ProjectListItem, ScriptApprovalPayload, ResplitPayload, VoiceConfigPayload
-from ..config import PROJECTS_PATH
-from ..services.pipeline_service import start_pipeline, start_pipeline_phase2, start_regenerate_script, start_resplit_chunks, start_generate_voiceover, start_pipeline_phase3, start_create_scenes_from_srt, start_generate_images, start_retry_chunk_image, start_generate_motion_prompts, start_animate_scenes, start_regenerate_image_genaipro, start_regenerate_all_genaipro
+from ..config import PROJECTS_PATH, settings as app_settings
+from ..services.pipeline_service import start_pipeline, start_pipeline_phase2, start_regenerate_script, start_generate_voiceover, start_pipeline_phase3, start_create_scenes_from_srt, start_generate_images, start_retry_chunk_image, start_generate_motion_prompts, start_animate_scenes, start_regenerate_image_genaipro, start_regenerate_all_genaipro
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -37,6 +37,16 @@ def _unique_slug(db: Session, base: str) -> str:
         slug = f"{base}-{counter}"
         counter += 1
     return slug
+
+
+def _resolve_tts_api_key(provided: str, db: Session) -> str:
+    """Return the Genaipro API key: use provided value, else DB settings, else .env."""
+    if provided:
+        return provided
+    row = db.query(AppSetting).filter(AppSetting.key == "genaipro_api_key").first()
+    if row and row.value:
+        return row.value
+    return app_settings.genaipro_api_key or ""
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -157,16 +167,38 @@ def regenerate_script(project_id: int, db: Session = Depends(get_db)):
     return project
 
 
-@router.post("/{project_id}/resplit", response_model=ProjectOut)
-def resplit_chunks(project_id: int, payload: ResplitPayload, db: Session = Depends(get_db)):
+class EditScriptPayload(BaseModel):
+    prompt: str
+
+
+@router.post("/{project_id}/edit-script")
+def edit_script(project_id: int, payload: EditScriptPayload, db: Session = Depends(get_db)):
+    """Use Claude to revise the current script based on the user's instruction.
+    Returns the revised script text without persisting it (user must approve)."""
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    if project.status not in (ProjectStatus.done, ProjectStatus.awaiting_voice_config, ProjectStatus.awaiting_audio_approval):
-        raise HTTPException(status_code=400, detail="Resplit only available when project is done, awaiting voice config, or awaiting audio approval")
+    if project.status != ProjectStatus.awaiting_approval:
+        raise HTTPException(status_code=400, detail="Project is not awaiting script approval")
 
-    start_resplit_chunks(project.id, payload.target_chunk_size)
-    return project
+    current = (project.script_final or project.script or "").strip()
+    if not current:
+        raise HTTPException(status_code=400, detail="No hay script disponible para editar")
+    if not payload.prompt.strip():
+        raise HTTPException(status_code=400, detail="El prompt no puede estar vacío")
+
+    from ..services.claude_service import edit_script_with_prompt
+    try:
+        revised = edit_script_with_prompt(current, payload.prompt.strip())
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Error al editar script con Claude: {exc}")
+
+    return {"script": revised}
+
+
+@router.post("/{project_id}/resplit", response_model=ProjectOut)
+def resplit_chunks(project_id: int, payload: ResplitPayload, db: Session = Depends(get_db)):
+    raise HTTPException(status_code=501, detail="Resplit no disponible. Las escenas se dividen automaticamente con Claude + SRT.")
 
 
 @router.post("/{project_id}/voice-config", response_model=ProjectOut)
@@ -212,8 +244,9 @@ def test_voice(
     if payload.tts_voice_id:
         config["voice_id"] = payload.tts_voice_id
 
+    api_key = _resolve_tts_api_key(payload.tts_api_key, db)
     try:
-        provider = get_provider(payload.tts_provider, payload.tts_api_key, config)
+        provider = get_provider(payload.tts_provider or "genaipro", api_key, config)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -242,8 +275,8 @@ def generate_voiceover(project_id: int, payload: VoiceConfigPayload, db: Session
         raise HTTPException(status_code=400, detail="El proyecto no está esperando configuración de voz")
 
     # Persist voice config
-    project.tts_provider = payload.tts_provider
-    project.tts_api_key  = payload.tts_api_key
+    project.tts_provider = payload.tts_provider or "genaipro"
+    project.tts_api_key  = _resolve_tts_api_key(payload.tts_api_key, db)
     project.tts_voice_id = payload.tts_voice_id
     project.tts_config   = payload.tts_config
     project.updated_at   = datetime.utcnow()
@@ -265,7 +298,10 @@ def get_voiceover_audio(project_id: int, db: Session = Depends(get_db)):
     path = Path(project.voiceover_path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Archivo de audio no encontrado en disco")
-    return FileResponse(str(path), media_type="audio/mpeg", filename="audio-completo.mp3")
+    return FileResponse(
+        str(path), media_type="audio/mpeg", filename="audio-completo.mp3",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @router.post("/{project_id}/approve-audio", response_model=ProjectOut)
@@ -403,6 +439,7 @@ def create_scenes_from_srt(project_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="No hay voiceover generado para este proyecto")
 
     project.status = ProjectStatus.queued
+    project.error_message = None
     project.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(project)

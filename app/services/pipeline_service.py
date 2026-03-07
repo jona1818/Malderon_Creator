@@ -31,7 +31,7 @@ from .claude_service import (
     clean_script,
     generate_image_prompt,
     generate_search_keywords,
-    DURATION_SCENES,
+    divide_script_into_scenes,
 )
 from .openai_service import generate_tts
 from . import pexels_service, pixabay_service, nca_service, google_service, wavespeed_service
@@ -85,7 +85,12 @@ def _get_reference_style(db, project) -> str | None:
 
 def _log(db: Session, project_id: int, message: str, stage: str = "", level: str = "info"):
     from ..models import Log
-    print(f"[{level.upper()}][{stage}] {message}")
+    import sys as _sys
+    try:
+        _sys.stdout.buffer.write(f"[{level.upper()}][{stage}] {message}\n".encode("utf-8", errors="replace"))
+        _sys.stdout.buffer.flush()
+    except Exception:
+        pass
     try:
         # Only log if project still exists (guards against delete-while-running)
         if not db.query(Project).filter(Project.id == project_id).first():
@@ -153,45 +158,6 @@ def final_dir(slug: str) -> Path:
     return project_dir(slug) / "final"
 
 
-# ── Script splitting ──────────────────────────────────────────────────────────
-
-def _find_sentence_break(text: str, target: int) -> int:
-    """Find the nearest sentence-ending position (.?!) around target index."""
-    start = min(target, len(text) - 1)
-    # Search backwards up to 400 chars
-    for i in range(start, max(start - 400, 0), -1):
-        if text[i] in '.?!' and (i + 1 >= len(text) or text[i + 1] in ' \n\t\r'):
-            return i + 1
-    # Search forwards up to 400 chars
-    for i in range(start, min(start + 400, len(text))):
-        if text[i] in '.?!' and (i + 1 >= len(text) or text[i + 1] in ' \n\t\r'):
-            return i + 1
-    # Hard fallback
-    return target
-
-
-def _split_script_by_chars(text: str, target_size: int = 1500) -> list:
-    """
-    Split text into chunks of ~target_size characters.
-    Never cuts in the middle of a sentence: finds the nearest .?! boundary.
-    """
-    chunks = []
-    remaining = text.strip()
-    num = 1
-    while remaining:
-        if len(remaining) <= target_size:
-            if remaining.strip():
-                chunks.append({"chunk_number": num, "narration": remaining.strip()})
-            break
-        break_at = _find_sentence_break(remaining, target_size)
-        chunk_text = remaining[:break_at].strip()
-        if chunk_text:
-            chunks.append({"chunk_number": num, "narration": chunk_text})
-            num += 1
-        remaining = remaining[break_at:].strip()
-    return chunks
-
-
 # ── Entry points ──────────────────────────────────────────────────────────────
 
 def start_pipeline(project_id: int):
@@ -240,7 +206,7 @@ def _run_pipeline_phase1(project_id: int):
             video_type=project.video_type or "top10",
             duration=project.duration or "6-8"
         )
-        
+
         script_text = clean_script(script_text)
         _update_project(db, project, script=script_text)
         _log(db, project_id, "Script generated. Awaiting manual approval.", stage="script")
@@ -292,8 +258,8 @@ def _regenerate_script_thread(project_id: int):
             video_type=project.video_type or "top10",
             duration=project.duration or "6-8"
         )
+
         script_text = clean_script(script_text)
-        
         _update_project(db, project, script=script_text, script_approved=False, script_final=None)
         _log(db, project_id, "Script regenerated. Awaiting manual approval.", stage="script")
         
@@ -319,7 +285,11 @@ def _regenerate_script_thread(project_id: int):
 # ── Phase 2: split script into chunks (no TTS/video yet) ──────────────────────
 
 def _run_pipeline_phase2(project_id: int):
-    """Split the approved script into character-based chunks and save them to DB."""
+    """Validate approved script and prepare for TTS.
+
+    In the new system the script is clean narration (no [N] markers).
+    Chunks are NOT created here — they're created after TTS + SRT + Claude scene division.
+    """
     db = SessionLocal()
     try:
         project = db.query(Project).filter(Project.id == project_id).first()
@@ -327,31 +297,29 @@ def _run_pipeline_phase2(project_id: int):
             return
 
         _update_project(db, project, status=ProjectStatus.processing)
-        _log(db, project_id, "Dividiendo script en chunks…", stage="chunks")
+        _log(db, project_id, "Procesando script aprobado...", stage="chunks")
 
         script_text = project.script_final or project.script
         if not script_text:
-            raise RuntimeError("No hay script disponible para dividir.")
+            raise RuntimeError("No hay script disponible.")
 
-        target_size = project.target_chunk_size or 1500
-        chunks_data = _split_script_by_chars(script_text, target_size)
-        _log(db, project_id, f"Script dividido en {len(chunks_data)} chunks (target {target_size} chars)", stage="chunks")
+        # Clean the script (remove any leftover formatting/markers)
+        script_text = clean_script(script_text)
+        project.script_final = script_text
 
-        # Delete any existing chunks, then insert fresh ones
+        word_count = len(script_text.split())
+        _log(db, project_id,
+             f"Script listo: {word_count} palabras. Listo para generar voiceover.",
+             stage="chunks")
+
+        # Delete any existing chunks from previous attempts
         db.query(Chunk).filter(Chunk.project_id == project_id).delete()
         db.commit()
 
-        for c in chunks_data:
-            db.add(Chunk(
-                project_id=project_id,
-                chunk_number=c["chunk_number"],
-                status=ChunkStatus.queued,
-                scene_text=c["narration"],
-            ))
-        db.commit()
-
         _update_project(db, project, status=ProjectStatus.awaiting_voice_config)
-        _log(db, project_id, f"Chunks creados: {len(chunks_data)} — configurar API de voz para continuar.", stage="done")
+        _log(db, project_id,
+             "Script procesado — configurar voz para continuar.",
+             stage="done")
 
     except _ProjectGoneError:
         print(f"[INFO][pipeline] Project {project_id} was deleted mid-run, aborting.")
@@ -367,54 +335,6 @@ def _run_pipeline_phase2(project_id: int):
         _log(db, project_id, f"Pipeline phase2 error: {exc}\n{traceback.format_exc()}", stage="error", level="error")
     finally:
         db.close()
-
-
-# ── Re-split chunks with a new target size ────────────────────────────────────
-
-def _resplit_chunks_thread(project_id: int, target_size: int):
-    """Delete existing chunks and re-split script with a new character target size."""
-    db = SessionLocal()
-    try:
-        project = db.query(Project).filter(Project.id == project_id).first()
-        if not project:
-            return
-
-        script_text = project.script_final or project.script
-        if not script_text:
-            raise RuntimeError("No hay script para re-dividir.")
-
-        _log(db, project_id, f"Re-dividiendo script con target={target_size} chars…", stage="chunks")
-
-        chunks_data = _split_script_by_chars(script_text, target_size)
-
-        db.query(Chunk).filter(Chunk.project_id == project_id).delete()
-        db.commit()
-
-        for c in chunks_data:
-            db.add(Chunk(
-                project_id=project_id,
-                chunk_number=c["chunk_number"],
-                status=ChunkStatus.queued,
-                scene_text=c["narration"],
-            ))
-        _update_project(db, project, target_chunk_size=target_size, status=ProjectStatus.awaiting_voice_config)
-        db.commit()
-
-        _log(db, project_id, f"Re-dividido en {len(chunks_data)} chunks.", stage="done")
-
-    except _ProjectGoneError:
-        pass
-    except Exception as exc:
-        db.rollback()
-        _log(db, project_id, f"Error al re-dividir: {exc}", stage="error", level="error")
-    finally:
-        db.close()
-
-
-def start_resplit_chunks(project_id: int, target_size: int):
-    """Launch chunk re-splitting in a daemon thread."""
-    t = threading.Thread(target=_resplit_chunks_thread, args=(project_id, target_size), daemon=True)
-    t.start()
 
 
 def _make_synthetic_srt(text: str, audio_path: Path) -> str:
@@ -613,12 +533,8 @@ def _synthetic_entries_from_audio(slug: str, db, project_id: int) -> tuple:
 
 
 def _run_create_scenes_from_srt(project_id: int) -> None:
-    """Divide the voiceover into 5-second scenes and pause at scenes_ready.
-
-    SRT source priority (no external APIs):
-    1. voiceover/subtitles.srt
-    2. voiceover/audio-chunk-N.srt (concatenated)
-    3. Duration estimated from audio-completo.mp3 via mutagen
+    """Use Claude + SRT to divide script into scenes with accurate timestamps,
+    then slice audio-completo.mp3 into per-scene segments.
     """
     db = SessionLocal()
     try:
@@ -628,112 +544,100 @@ def _run_create_scenes_from_srt(project_id: int) -> None:
 
         slug = project.slug
         vo = voiceover_dir(slug)
-        interval = 5  # seconds per scene
 
-        # ── Resolve SRT entries ────────────────────────────────────────────────
-        srt_file, entries = _find_srt_for_project(slug)
+        # ── Get the script text (clean narration)
+        script_text = (project.script_final or project.script or "").strip()
+        if not script_text:
+            raise RuntimeError("No hay script disponible para dividir en escenas.")
 
-        if entries:
-            _log(db, project_id,
-                 f"SRT encontrado: {Path(srt_file).name} ({len(entries)} entradas). Creando escenas…",
-                 stage="srt_scenes")
-            total_duration = max(end for _, end, _ in entries)
-            use_srt = True
-        else:
-            # No SRT — estimate duration from audio file size
-            _log(db, project_id,
-                 "No se encontró SRT. Estimando duración desde audio-completo.mp3…",
-                 stage="srt_scenes")
-            total_duration, entries = _synthetic_entries_from_audio(slug, db, project_id)
-            use_srt = False
-
-        num_scenes = max(1, round(total_duration / interval))
         _log(db, project_id,
-             f"Duración total: {total_duration:.1f}s → {num_scenes} escenas de {interval}s.",
+             f"Script cargado ({len(script_text.split())} palabras). Buscando SRT...",
              stage="srt_scenes")
 
-        # ── Collect existing chunk texts for fallback ──────────────────────────
-        old_chunks = (
+        # ── Find and read the SRT file
+        srt_file, srt_entries = _find_srt_for_project(slug)
+        if not srt_entries:
+            raise RuntimeError(
+                "No se encontro archivo SRT. El proveedor TTS debe generar subtitulos."
+            )
+
+        srt_content = Path(srt_file).read_text(encoding="utf-8", errors="replace")
+        total_duration = max(end for _, end, _ in srt_entries)
+        _log(db, project_id,
+             f"SRT encontrado: {Path(srt_file).name} ({len(srt_entries)} entradas, {total_duration:.1f}s).",
+             stage="srt_scenes")
+
+        # ── Call Claude to divide script into scenes using real SRT timestamps
+        _log(db, project_id,
+             "Enviando script + SRT a Claude para division de escenas...",
+             stage="srt_scenes")
+
+        scenes = divide_script_into_scenes(script_text, srt_content)
+
+        _log(db, project_id,
+             f"Claude dividio el script en {len(scenes)} escenas.",
+             stage="srt_scenes")
+
+        for s in scenes:
+            dur = s["endMs"] - s["startMs"]
+            _log(db, project_id,
+                 f"[Escena {s['id']}] {s['startMs']}ms - {s['endMs']}ms ({dur / 1000:.1f}s)",
+                 stage="srt_scenes")
+
+        # ── Create Chunk records from Claude's JSON
+        db.query(Chunk).filter(Chunk.project_id == project_id).delete()
+        db.flush()
+        db.expire_all()
+
+        for s in scenes:
+            db.add(Chunk(
+                project_id=project_id,
+                chunk_number=s["id"],
+                status=ChunkStatus.pending,
+                scene_text=s["texto"],
+                start_ms=s["startMs"],
+                end_ms=s["endMs"],
+            ))
+        db.commit()
+
+        chunks = (
             db.query(Chunk)
             .filter(Chunk.project_id == project_id)
             .order_by(Chunk.chunk_number)
             .all()
         )
-        full_text = " ".join(c.scene_text or "" for c in old_chunks).strip()
 
-        # ── Delete old chunks ──────────────────────────────────────────────────
-        db.query(Chunk).filter(Chunk.project_id == project_id).delete()
-        db.commit()
-
-        # ── Create new chunks ──────────────────────────────────────────────────
-        words = full_text.split() if not use_srt else []
-        for i in range(num_scenes):
-            if use_srt:
-                scene_start = i * interval
-                scene_end   = (i + 1) * interval
-                scene_texts = [
-                    text for (start, end, text) in entries
-                    if start < scene_end and end > scene_start
-                ]
-                scene_text = " ".join(scene_texts).strip() or f"[Escena {i + 1}]"
-            else:
-                # Distribute words evenly across scenes
-                chunk_start = int(len(words) * i / num_scenes)
-                chunk_end   = int(len(words) * (i + 1) / num_scenes)
-                scene_text  = " ".join(words[chunk_start:chunk_end]) or f"[Escena {i + 1}]"
-
-            chunk = Chunk(
-                project_id=project_id,
-                chunk_number=i + 1,
-                status=ChunkStatus.pending,
-                scene_text=scene_text,
-                srt_path=str(srt_file) if srt_file else None,
-            )
-            db.add(chunk)
-
-        db.commit()
-        _log(db, project_id,
-             f"{num_scenes} escenas creadas.",
-             stage="srt_scenes")
-
-        # ── Slice audio-completo.mp3 into per-scene segments ───────────────────
-        # Each new scene chunk needs its own ~5s audio file so that NCA renders
-        # the correct portion of the voiceover for that scene.
+        # ── Slice audio-completo.mp3 into per-scene segments
         audio_complete = vo / "audio-completo.mp3"
         if audio_complete.exists():
-            _log(db, project_id,
-                 f"Dividiendo audio-completo.mp3 en {num_scenes} segmentos de {interval}s…",
-                 stage="srt_scenes")
-            new_chunks = (
-                db.query(Chunk)
-                .filter(Chunk.project_id == project_id)
-                .order_by(Chunk.chunk_number)
-                .all()
-            )
             import shutil as _shutil
-            for scene_chunk in new_chunks:
-                n = scene_chunk.chunk_number
-                start_sec = (n - 1) * interval
+            _log(db, project_id,
+                 f"Dividiendo audio en {len(chunks)} segmentos...",
+                 stage="srt_scenes")
+            for chunk in chunks:
+                n = chunk.chunk_number
+                start_sec = chunk.start_ms / 1000.0
+                duration_sec = max((chunk.end_ms - chunk.start_ms) / 1000.0, 0.1)
                 scene_audio = vo / f"audio-chunk-{n}.mp3"
                 try:
-                    _slice_mp3(audio_complete, scene_audio, start_sec, float(interval))
+                    _slice_mp3(audio_complete, scene_audio, start_sec, duration_sec)
                     _log(db, project_id,
-                         f"[Escena {n}] Audio cortado ({start_sec:.0f}s – {start_sec + interval:.0f}s).",
+                         f"[Escena {n}] Audio cortado ({start_sec:.1f}s - {start_sec + duration_sec:.1f}s).",
                          stage="srt_scenes")
                 except Exception as exc:
                     _log(db, project_id,
-                         f"[Escena {n}] ffmpeg no disponible, copiando audio completo: {exc}",
+                         f"[Escena {n}] ffmpeg fallo, copiando audio completo: {exc}",
                          stage="srt_scenes", level="warning")
                     _shutil.copy2(str(audio_complete), str(scene_audio))
-                _update_chunk(db, scene_chunk, audio_path=str(scene_audio))
+                _update_chunk(db, chunk, audio_path=str(scene_audio))
         else:
             _log(db, project_id,
-                 "AVISO: audio-completo.mp3 no encontrado — las escenas no tendrán audio.",
+                 "AVISO: audio-completo.mp3 no encontrado.",
                  stage="srt_scenes", level="warning")
 
         _update_project(db, project, status=ProjectStatus.scenes_ready)
         _log(db, project_id,
-             f"✅ {num_scenes} escenas listas. Esperando instrucciones para generar imágenes.",
+             f"{len(chunks)} escenas creadas y listas.",
              stage="srt_scenes")
 
     except Exception as exc:
@@ -752,7 +656,7 @@ def _run_create_scenes_from_srt(project_id: int) -> None:
 
 
 def start_create_scenes_from_srt(project_id: int) -> None:
-    """Parse global SRT → create scene chunks → start phase 3. Runs in background thread."""
+    """Align scene chunks to SRT and slice audio. Runs in background thread."""
     t = threading.Thread(target=_run_create_scenes_from_srt, args=(project_id,), daemon=True)
     t.start()
 
@@ -1273,7 +1177,7 @@ def _run_generate_voiceover(project_id: int):
             return
 
         _update_project(db, project, status=ProjectStatus.processing)
-        _log(db, project_id, "Iniciando generación de voiceover con TTS…", stage="tts")
+        _log(db, project_id, "Iniciando generacion de voiceover con TTS...", stage="tts")
 
         if not project.tts_provider or not project.tts_api_key:
             raise RuntimeError("Proveedor TTS o API key no configurados.")
@@ -1287,106 +1191,54 @@ def _run_generate_voiceover(project_id: int):
         except ValueError as exc:
             raise RuntimeError(str(exc))
 
-        chunks = (
-            db.query(Chunk)
-            .filter(Chunk.project_id == project_id)
-            .order_by(Chunk.chunk_number)
-            .all()
-        )
-
-        if not chunks:
-            raise RuntimeError("No hay chunks disponibles para generar audio.")
+        # Use clean text (no [N] markers) for TTS — single call
+        clean_text = project.script_final or project.script
+        if not clean_text:
+            raise RuntimeError("No hay script disponible para generar audio.")
 
         vo_dir = voiceover_dir(project.slug)
         vo_dir.mkdir(parents=True, exist_ok=True)
 
-        errors: list[str] = []
-        for chunk in chunks:
-            try:
-                _update_chunk(db, chunk, status=ChunkStatus.processing)
-                audio_path = vo_dir / f"audio-chunk-{chunk.chunk_number}.mp3"
-                _log(
-                    db, project_id,
-                    f"[Chunk {chunk.chunk_number}] Generando audio TTS…",
-                    stage=f"chunk_{chunk.chunk_number}_tts",
-                )
-                provider.generate(chunk.scene_text or "", audio_path)
-                size_kb = audio_path.stat().st_size // 1024
-                _log(
-                    db, project_id,
-                    f"[Chunk {chunk.chunk_number}] Audio generado ({size_kb} KB).",
-                    stage=f"chunk_{chunk.chunk_number}_tts",
-                )
+        complete_path = vo_dir / "audio-completo.mp3"
+        _log(db, project_id, f"Generando audio TTS (texto completo: {len(clean_text)} chars)...", stage="tts")
 
-                # SRT: use TTS provider's file if returned, otherwise generate from script
-                srt_path = audio_path.with_suffix(".srt")
-                if srt_path.exists():
-                    srt_path_str = str(srt_path)
-                    _log(db, project_id,
-                         f"[Chunk {chunk.chunk_number}] SRT descargado desde TTS provider.",
-                         stage=f"chunk_{chunk.chunk_number}_tts")
-                else:
-                    # TTS provider didn't return subtitles for this voice —
-                    # generate SRT locally from the script text + audio duration.
-                    # Text is the exact script that was spoken, so this is correct.
-                    try:
-                        srt_content = _make_script_srt(chunk.scene_text or "", audio_path)
-                        srt_path.write_text(srt_content, encoding="utf-8")
-                        srt_path_str = str(srt_path)
-                        _log(db, project_id,
-                             f"[Chunk {chunk.chunk_number}] SRT generado desde texto del script.",
-                             stage=f"chunk_{chunk.chunk_number}_tts")
-                    except Exception as srt_exc:
-                        srt_path_str = None
-                        _log(db, project_id,
-                             f"[Chunk {chunk.chunk_number}] No se pudo generar SRT: {srt_exc}",
-                             stage=f"chunk_{chunk.chunk_number}_tts",
-                             level="warning")
+        provider.generate(clean_text, complete_path)
 
-                _update_chunk(db, chunk, audio_path=str(audio_path), srt_path=srt_path_str, status=ChunkStatus.done)
-            except Exception as exc:
-                _update_chunk(db, chunk, status=ChunkStatus.error, error_message=str(exc))
-                _log(
-                    db, project_id,
-                    f"[Chunk {chunk.chunk_number}] Error TTS: {exc}",
-                    stage=f"chunk_{chunk.chunk_number}_tts",
-                    level="error",
-                )
-                errors.append(f"Chunk {chunk.chunk_number}: {exc}")
+        size_kb = complete_path.stat().st_size // 1024
+        _log(db, project_id, f"Audio completo generado: {size_kb} KB", stage="tts_done")
 
-        if errors:
-            _update_project(
-                db, project,
-                status=ProjectStatus.error,
-                error_message=f"TTS errors: {'; '.join(errors)}",
-            )
-            _log(db, project_id, f"Voiceover completado con errores: {'; '.join(errors)}", stage="tts_done", level="error")
+        # SRT: GenAIPro downloads it alongside the MP3
+        srt_from_tts = complete_path.with_suffix(".srt")
+        subtitles_path = vo_dir / "subtitles.srt"
+        if srt_from_tts.exists():
+            import shutil as _shutil
+            if str(srt_from_tts) != str(subtitles_path):
+                _shutil.copy2(str(srt_from_tts), str(subtitles_path))
+            entries = _parse_srt_entries(subtitles_path)
+            _log(db, project_id,
+                 f"subtitles.srt descargado ({len(entries)} entradas).",
+                 stage="tts_done")
         else:
-            # Concatenate all chunk MP3s → audio-completo.mp3
-            complete_path = vo_dir / "audio-completo.mp3"
-            try:
-                audio_files = [
-                    vo_dir / f"audio-chunk-{c.chunk_number}.mp3"
-                    for c in chunks
-                ]
-                with open(complete_path, "wb") as out:
-                    for af in audio_files:
-                        if af.exists():
-                            out.write(af.read_bytes())
-                _log(db, project_id, f"Audio completo generado: {complete_path.stat().st_size // 1024} KB", stage="tts_done")
-            except Exception as exc:
-                _log(db, project_id, f"Warning: no se pudo concatenar audio: {exc}", stage="tts_done", level="warning")
-                complete_path = None
+            # Fallback: generate SRT from text + audio duration
+            srt_content = _make_script_srt(clean_text, complete_path)
+            subtitles_path.write_text(srt_content, encoding="utf-8")
+            _log(db, project_id,
+                 "SRT generado desde texto del script (TTS no retorno subtitulos).",
+                 stage="tts_done")
 
-            # Merge per-chunk SRTs → subtitles.srt (adjusting timestamps)
-            _merge_chunk_srts(db, project_id, chunks, vo_dir)
+        # Mark all scene chunks as done
+        chunks = db.query(Chunk).filter(Chunk.project_id == project_id).all()
+        for chunk in chunks:
+            _update_chunk(db, chunk, status=ChunkStatus.done)
 
-            _update_project(
-                db, project,
-                status=ProjectStatus.awaiting_audio_approval,
-                voiceover_path=str(complete_path) if complete_path and complete_path.exists() else None,
-            )
-            _log(db, project_id, f"Voiceover generado exitosamente para {len(chunks)} chunks. Esperando aprobación de audio.", stage="tts_done")
+        _update_project(
+            db, project,
+            status=ProjectStatus.awaiting_audio_approval,
+            voiceover_path=str(complete_path),
+        )
+        _log(db, project_id,
+             f"Voiceover generado exitosamente ({len(chunks)} escenas). Esperando aprobacion de audio.",
+             stage="tts_done")
 
     except _ProjectGoneError:
         print(f"[INFO][tts] Project {project_id} was deleted mid-run, aborting.")
@@ -1727,13 +1579,13 @@ def _run_regenerate_all_genaipro(project_id: int) -> None:
             """Generate a single image. Returns (chunk_number, error_or_None)."""
             n = task["n"]
             try:
-                print(f"[imagen_{n}] Generando con {img_provider.capitalize()}…")
+                print(f"[imagen_{n}] Generando con {img_provider.capitalize()}...")
                 _dispatch_generate_image(
                     task["prompt"], task["path"],
                     provider=img_provider, api_key=poll_key, wavespeed_api_key=ws_key,
                     reference_character_path=ref_char, reference_style_path=ref_style,
                 )
-                print(f"[imagen_{n}] ✅ Guardada: image_{n}.jpg")
+                print(f"[imagen_{n}] Guardada: image_{n}.jpg")
                 return (n, None)
             except Exception as exc:
                 return (n, str(exc))

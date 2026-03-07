@@ -1,4 +1,11 @@
 """YouTube Video Creator – FastAPI entry point."""
+import sys, io
+
+# Fix Windows cp1252 stdout — allow Unicode (emojis, arrows, accented chars)
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+
 from pathlib import Path
 
 from fastapi import FastAPI, Request

@@ -30,6 +30,8 @@ class ChunkOut(BaseModel):
     motion_prompt: Optional[str] = None
     video_path: Optional[str]
     rendered_path: Optional[str]
+    start_ms: Optional[int] = None
+    end_ms: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -109,8 +111,8 @@ class ResplitPayload(BaseModel):
 # ── Voice configuration ───────────────────────────────────────────────────────
 
 class VoiceConfigPayload(BaseModel):
-    tts_provider: str                  # genaipro | elevenlabs | openai
-    tts_api_key: str                   # raw key — stored in DB, never returned to client
+    tts_provider: str = "genaipro"
+    tts_api_key: str = ""              # optional — backend reads from settings if empty
     tts_voice_id: Optional[str] = None
     tts_config: Optional[str] = None  # JSON string with extra provider-specific fields
 

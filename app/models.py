@@ -92,6 +92,8 @@ class Chunk(Base):
     video_path = Column(String(512), nullable=True)
     rendered_path = Column(String(512), nullable=True)
     srt_path = Column(String(512), nullable=True)
+    start_ms = Column(Integer, nullable=True)    # scene start in milliseconds
+    end_ms = Column(Integer, nullable=True)      # scene end in milliseconds
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
