@@ -61,8 +61,8 @@ def _get_wavespeed_api_key(db) -> str:
 
 
 def _get_image_provider(db) -> str:
-    """Return the image provider name (DB setting → .env → default 'wavespeed')."""
-    return _get_db_setting(db, "image_provider") or settings.image_provider or "wavespeed"
+    """Return the image provider name (DB setting → .env → default 'pollinations')."""
+    return _get_db_setting(db, "image_provider") or settings.image_provider or "pollinations"
 
 
 def _get_reference_character(db, project) -> str | None:
@@ -649,8 +649,8 @@ def _run_create_scenes_from_srt(project_id: int) -> None:
             _log(db, project_id,
                  f"Error creando escenas: {exc}\n{traceback.format_exc()}",
                  stage="srt_scenes", level="error")
-        except Exception:
-            pass
+        except Exception as inner_exc:
+            print(f"[CRITICAL] Failed to log scene error for project {project_id}: {inner_exc}")
     finally:
         db.close()
 

@@ -11,11 +11,13 @@ Malderon Creator orquesta múltiples APIs de inteligencia artificial para produc
 ```
 📝 Tema
   ↓
-✍️  Script (Claude AI)
+✍️  Script (Gemini via OpenRouter)
   ↓
 🎙️ Voiceover + SRT (GenAIPro / ElevenLabs / OpenAI)
   ↓
-🖼️  Imágenes por escena (Imagen 3 / Pollinations / WaveSpeed)
+🖼️  División de escenas con SRT (Gemini via OpenRouter)
+  ↓
+🖼️  Imágenes cinematográficas por escena (Pollinations FLUX / WaveSpeed)
   ↓
 🎞️  Animación (WaveSpeed i2v)
   ↓
@@ -42,12 +44,11 @@ Malderon Creator orquesta múltiples APIs de inteligencia artificial para produc
 ### Inteligencia Artificial
 | API | Uso |
 |---|---|
-| 🤖 **Anthropic Claude** (claude-opus-4-6, claude-haiku-4-5) | Generación de scripts, prompts de imágenes, prompts de movimiento, división de escenas con SRT |
+| 🔀 **OpenRouter** (Gemini 2.0 Flash) | Generación de scripts, prompts de imágenes, división de escenas con SRT — todo pasa por OpenRouter |
 | 🎙️ **GenAIPro TTS** | Text-to-speech principal + generación de subtítulos SRT con timestamps reales |
 | 🔊 **ElevenLabs** | Proveedor TTS alternativo |
 | 🗣️ **OpenAI TTS + Whisper** | TTS alternativo + transcripción a SRT |
-| 🖼️ **Google Imagen 3** | Generación de imágenes de alta calidad |
-| 🆓 **Pollinations.ai (FLUX)** | Generación de imágenes gratuita con soporte de imagen de referencia |
+| 🆓 **Pollinations.ai (FLUX)** | Generación de imágenes cinematográficas (proveedor principal) |
 | 🚀 **WaveSpeed** | Generación de imágenes premium + animación imagen-a-video (i2v) |
 | 🎬 **GenAIPro Veo** | Generación de video con IA |
 
@@ -91,9 +92,9 @@ Malderon_Creator/
 │   │   └── ⚙️  settings.py          # Gestión de API keys globales
 │   │
 │   └── services/                   # Lógica de negocio
-│       ├── 🤖 claude_service.py    # Generación de scripts + división de escenas con SRT
+│       ├── 🤖 claude_service.py    # Scripts + prompts + división de escenas (OpenRouter/Gemini)
 │       ├── 🏭 pipeline_service.py  # Orquestador principal del pipeline (fases 1-4)
-│       ├── 🖼️  google_service.py    # Generación de imágenes con Imagen 3
+│       ├── 🖼️  google_service.py    # Batch prompts de imagen/video (OpenRouter/Gemini)
 │       ├── 🎬 nca_service.py       # Render y concatenación de video (NCA Toolkit)
 │       ├── 🚀 wavespeed_service.py # Animación imagen-a-video
 │       ├── 📸 pexels_service.py    # Búsqueda de stock en Pexels
@@ -135,16 +136,16 @@ Malderon_Creator/
 Copiá `.env.example` a `.env` y completá las claves que necesitás:
 
 ```env
-# 🤖 Modelos de IA
-ANTHROPIC_API_KEY=sk-ant-...         # Claude (obligatorio)
+# 🤖 Modelos de IA — todo vía OpenRouter
+OPENROUTER_API_KEY=sk-or-v1-...     # OpenRouter (obligatorio — scripts, prompts, división de escenas)
 OPENAI_API_KEY=sk-proj-...           # OpenAI GPT + Whisper (opcional)
-GOOGLE_API_KEY=AIzaSy...             # Google Imagen 3 (opcional)
+GOOGLE_API_KEY=AIzaSy...             # Google API (opcional — no requerida si usas OpenRouter)
 
 # 🎙️ Text-to-Speech
 GENAIPRO_API_KEY=eyJh...             # GenAIPro TTS + video (obligatorio)
 
 # 🖼️ Generación de imágenes
-POLLINATIONS_API_KEY=sk_...          # Pollinations FLUX (gratuito, opcional)
+POLLINATIONS_API_KEY=sk_...          # Pollinations FLUX (proveedor principal)
 WAVESPEED_API_KEY=...                # WaveSpeed i2v (opcional)
 
 # 📸 Stock media
@@ -200,17 +201,17 @@ El pipeline se ejecuta en 4 fases automáticas:
 
 ```
 Fase 1 — 📝 Generación de Script
-  └─ Claude genera el script completo a partir del tema
+  └─ Gemini (via OpenRouter) genera el script completo como narración limpia (sin marcadores)
 
 Fase 2 — 🎙️ Configuración de Voz
   └─ Usuario selecciona voz y parámetros TTS
   └─ GenAIPro genera audio-completo.mp3 + subtitles.srt
 
 Fase 3 — 🖼️ División de escenas + Imágenes
-  └─ Claude divide el script usando los timestamps reales del SRT
-     (bloques de ~60s para videos largos)
-  └─ Se generan prompts visuales para cada escena
-  └─ Se generan imágenes (Imagen 3 / Pollinations / WaveSpeed)
+  └─ Gemini (via OpenRouter) divide el script usando los timestamps reales del SRT
+     (bloques de ~60s para videos largos, escenas de 5-8s)
+  └─ Gemini genera prompts visuales cinematográficos en batch (estilo consistente)
+  └─ Pollinations FLUX genera imágenes 1920x1080 por escena
 
 Fase 4 — 🎬 Animación + Render
   └─ WaveSpeed anima cada imagen (i2v)
@@ -249,9 +250,8 @@ SQLite con modo WAL para acceso concurrente. Tablas principales:
 fastapi          # Framework web
 uvicorn          # Servidor ASGI
 sqlalchemy       # ORM base de datos
-anthropic        # Claude AI
-openai           # GPT + Whisper
-google-genai     # Imagen 3 + Gemini
+openai           # SDK compatible con OpenRouter + GPT + Whisper
+google-genai     # Gemini (para Imagen 3 si disponible)
 requests         # HTTP cliente
 sse-starlette    # Server-Sent Events
 pydantic-settings # Configuración tipada

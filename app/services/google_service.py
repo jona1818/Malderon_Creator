@@ -1,53 +1,66 @@
 """
-Google AI Studio service — Imagen 3 image generation ("Nano Banana").
+AI prompt generation service — batch image & video prompts via OpenRouter.
 
-API key:  GOOGLE_API_KEY in .env
-Model:    imagen-3.0-generate-002  (16:9 native, 1024×576 → upscaled)
-Aspect:   16:9  (YouTube landscape)
-Output:   /projects/{slug}/chunk_N/images/image_N.jpg
-
-This is the PRIMARY image generation engine for the whole pipeline.
-All batch image prompts are generated with Gemini 1.5 Flash before calling
-Imagen so that only one AI call is needed per scene instead of two.
-
-Veo (video animation) is NOT yet implemented — animate_image() is a no-op stub
-that copies the image so NCA can treat it as a still.
+Uses OpenRouter (Gemini) for all AI calls, same as claude_service.py.
+Image generation itself is handled by Pollinations (pollinations_service.py).
 """
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
+from openai import OpenAI
 from ..config import settings
 
+# ── OpenRouter client (shared config with claude_service) ────────────────────
 
-# ── Auth helper ───────────────────────────────────────────────────────────────
-
-def _api_key() -> str:
-    key = settings.google_api_key
-    if not key:
-        raise RuntimeError(
-            "GOOGLE_API_KEY no está configurado en .env. "
-            "Agrega: GOOGLE_API_KEY=tu_clave_aqui"
-        )
-    return key
+_client = OpenAI(
+    api_key=settings.openrouter_api_key,
+    base_url="https://openrouter.ai/api/v1",
+)
+_MODEL_FAST = "google/gemini-2.0-flash-lite-001"
 
 
-# ── Batch Image Prompt Generation — Gemini 1.5 Flash ─────────────────────────
+def _chat(system: str, user: str, max_tokens: int = 4096) -> str:
+    resp = _client.chat.completions.create(
+        model=_MODEL_FAST,
+        max_tokens=max_tokens,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    )
+    return resp.choices[0].message.content.strip()
 
-_BATCH_PROMPT_SYSTEM = """You are a visual prompt engineer for AI image generation.
-Create detailed, cinematic image prompts optimized for Google Imagen 4.
+
+# ── Batch Image Prompt Generation ────────────────────────────────────────────
+
+_BATCH_PROMPT_SYSTEM = """You are a visual prompt engineer for cinematic AI image generation.
+Create detailed, photorealistic image prompts for a documentary-style YouTube video.
+
+CRITICAL RULES FOR VISUAL CONSISTENCY:
+- Every prompt must share the SAME visual style: cinematic, dark moody lighting, rich color grading.
+- Use consistent color palette across all scenes (deep shadows, warm highlights, desaturated midtones).
+- Camera style: professional documentary cinematography (wide establishing shots, medium close-ups, aerial views).
+- Lighting: dramatic natural light, golden hour, volumetric fog, rim lighting, chiaroscuro.
+- NO people, NO characters, NO faces, NO human figures unless the narration explicitly describes a specific person.
+- Focus on: landscapes, architecture, objects, environments, abstract concepts, aerial views, macro details.
+- Aspect ratio: 16:9 widescreen. No text, no watermarks, no logos, no borders.
+- Each prompt must be self-contained (describe everything needed to generate the image).
+
 For each scene, produce a rich, comma-separated description including:
-- Composition and framing
+- Subject and composition
 - Lighting and color palette
-- Camera angle
+- Camera angle and lens (e.g., wide-angle, telephoto, drone shot)
 - Mood and atmosphere
-- Key visual elements
-Style: cinematic, documentary, photorealistic. 16:9 aspect ratio. No text, no watermarks.
+- Textures and details
+
 Return ONLY valid JSON — no markdown fences, no extra text."""
 
-_BATCH_PROMPT_TEMPLATE = """Generate detailed visual image prompts for all scenes in this video.
+_BATCH_PROMPT_TEMPLATE = """Generate detailed cinematic image prompts for all scenes in this video.
 
-Reference style/character: {reference_character}
+Visual style reference: {reference_style}
 
 Scenes:
 {scenes_block}
@@ -57,7 +70,7 @@ Return JSON:
   "prompts": [
     {{
       "scene_number": 1,
-      "image_prompt": "Detailed photorealistic prompt for scene 1..."
+      "image_prompt": "Detailed cinematic prompt for scene 1..."
     }},
     ...
   ]
@@ -65,17 +78,13 @@ Return JSON:
 
 
 def batch_generate_image_prompts(
-    scenes: list[dict],  # list of {"scene_number": int, "narration": str, "visual_description": str}
+    scenes: list[dict],
     reference_character: str = "",
 ) -> dict[int, str]:
-    """Send all scenes to Gemini 1.5 Flash in ONE call and return {scene_number: prompt}.
+    """Send all scenes in ONE call and return {scene_number: prompt}.
 
-    This replaces per-scene Claude calls: much cheaper, faster, and avoids 429/529 errors.
+    Uses OpenRouter (Gemini) instead of Google API directly.
     """
-    import json
-    import re
-    from google import genai
-
     scenes_block = "\n".join(
         f"Scene {s['scene_number']}:\n"
         f"  Narration: {s['narration'][:300]}\n"
@@ -83,19 +92,13 @@ def batch_generate_image_prompts(
         for s in scenes
     )
 
+    style = reference_character or "cinematic, photorealistic, documentary, dark moody lighting, no people"
     prompt = _BATCH_PROMPT_TEMPLATE.format(
-        reference_character=reference_character or "cinematic, photorealistic, documentary",
+        reference_style=style,
         scenes_block=scenes_block,
     )
 
-    client = genai.Client(api_key=_api_key())
-    response = client.models.generate_content(
-        model="gemini-1.5-flash-002",
-        contents=f"{_BATCH_PROMPT_SYSTEM}\n\n{prompt}",
-    )
-
-    raw = response.text.strip()
-    # Strip markdown fences if present
+    raw = _chat(_BATCH_PROMPT_SYSTEM, prompt, max_tokens=8192)
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
     raw = re.sub(r"\s*```$", "", raw)
     data = json.loads(raw)
@@ -103,7 +106,7 @@ def batch_generate_image_prompts(
     return {item["scene_number"]: item["image_prompt"] for item in data["prompts"]}
 
 
-# ── Batch Video Prompt Generation (Motion Instructions) — Gemini 1.5 Flash ───
+# ── Batch Video Prompt Generation (Motion Instructions) ──────────────────────
 
 _BATCH_VIDEO_SYSTEM = """You are an AI video motion director.
 Write extremely concise, literal MOTION instructions for the LTX Video AI model based on the scene's narration.
@@ -132,13 +135,9 @@ Return JSON:
 }}"""
 
 def batch_generate_video_prompts(
-    scenes: list[dict],  # list of {"scene_number": int, "narration": str, "image_prompt": str}
+    scenes: list[dict],
 ) -> dict[int, str]:
-    """Send all scenes to Gemini 1.5 Flash to generate LTX motion instructions."""
-    import json
-    import re
-    from google import genai
-
+    """Send all scenes to generate LTX motion instructions via OpenRouter."""
     scenes_block = "\n".join(
         f"Scene {s['scene_number']}:\n"
         f"  Narration (what's happening): {s['narration'][:300]}\n"
@@ -147,14 +146,7 @@ def batch_generate_video_prompts(
     )
 
     prompt = _BATCH_VIDEO_TEMPLATE.format(scenes_block=scenes_block)
-
-    client = genai.Client(api_key=_api_key())
-    response = client.models.generate_content(
-        model="gemini-1.5-flash-002",
-        contents=f"{_BATCH_VIDEO_SYSTEM}\n\n{prompt}",
-    )
-
-    raw = response.text.strip()
+    raw = _chat(_BATCH_VIDEO_SYSTEM, prompt, max_tokens=4096)
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
     raw = re.sub(r"\s*```$", "", raw)
     data = json.loads(raw)
@@ -162,8 +154,7 @@ def batch_generate_video_prompts(
     return {item["scene_number"]: item["video_prompt"] for item in data["prompts"]}
 
 
-
-# ── Image generation — Imagen 3.0 ─────────────────────────────────────────────
+# ── Image generation — Imagen 3.0 (kept for compatibility but Pollinations is primary) ──
 
 def generate_image(
     prompt: str,
@@ -172,19 +163,18 @@ def generate_image(
     safety_filter_level: str = "block_only_high",
     person_generation: str = "allow_adult",
 ) -> Path:
-    """Generate one image with Imagen 3.0 and save it to output_path (JPEG).
-
-    Uses the google-genai SDK (not the deprecated google-generativeai).
-    Model: imagen-3.0-generate-002
-    """
+    """Generate one image with Imagen 3.0 (requires GOOGLE_API_KEY with credits)."""
     from google import genai
     from google.genai import types
+
+    key = settings.google_api_key
+    if not key:
+        raise RuntimeError("GOOGLE_API_KEY no configurado.")
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    client = genai.Client(api_key=_api_key())
-
+    client = genai.Client(api_key=key)
     response = client.models.generate_images(
         model="imagen-3.0-generate-002",
         prompt=prompt,
@@ -197,10 +187,7 @@ def generate_image(
     )
 
     if not response.generated_images:
-        raise RuntimeError(
-            "Google Imagen 3 no devolvió imágenes. "
-            "Revisa los filtros de seguridad o el prompt."
-        )
+        raise RuntimeError("Google Imagen 3 no devolvió imágenes.")
 
     image_bytes = response.generated_images[0].image.image_bytes
     if not image_bytes:
@@ -218,13 +205,8 @@ def animate_image(
     output_path: Path,
     prompt: str = "",
 ) -> Path:
-    """Stub — Veo video generation not yet implemented.
-
-    Copies the source image to output_path so that NCA can use it as a
-    static background. Replace this with a real Veo call when ready.
-    """
+    """Stub — Veo video generation not yet implemented."""
     import shutil
-
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(str(image_path), str(output_path))
