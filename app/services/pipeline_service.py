@@ -695,24 +695,23 @@ def _generate_media_for_chunk(
         if img_prompt:
             _log(db, project_id, f"[Pollinations {n}] ✓ Prompt pre-generado listo.", stage=f"media_{n}")
         else:
-            _log(db, project_id, f"[Pollinations {n}] Generando prompt con Claude…", stage=f"media_{n}")
+            _log(db, project_id, f"[Pollinations {n}] Generando prompt con Gemini…", stage=f"media_{n}")
             generated = None
             for _attempt in range(3):
                 try:
                     generated = generate_image_prompt(narration, "", reference_character or "")
                     break
                 except Exception as _exc:
-                    _exc_str = str(_exc)
-                    if "529" in _exc_str or "overloaded" in _exc_str.lower():
-                        import time as _t; _t.sleep(5 * (2 ** _attempt))
-                    else:
-                        raise
+                    _log(db, project_id,
+                         f"[Pollinations {n}] ⚠️ Intento {_attempt+1}/3 falló: {_exc}",
+                         stage=f"media_{n}", level="warning")
+                    import time as _t; _t.sleep(3 * (2 ** _attempt))
             img_prompt = (generated or "").strip()
             if not img_prompt:
                 # Last-resort fallback: use the narration text itself
                 img_prompt = narration.strip()[:800]
                 _log(db, project_id,
-                     f"[Pollinations {n}] ⚠️ Claude no generó prompt — usando narración como fallback.",
+                     f"[Pollinations {n}] ⚠️ No se generó prompt — usando narración como fallback.",
                      stage=f"media_{n}", level="warning")
             if not img_prompt:
                 raise RuntimeError(f"Escena {n} no tiene texto — no se puede generar imagen.")
@@ -1262,7 +1261,16 @@ def _animated_branch(db, project_id, chunk, n, slug, narration, visual_desc, ref
     _log(db, project_id, f"[Chunk {n}] Generando prompt de imagen…", stage=f"chunk_{n}_imgprompt")
     img_prompt = (chunk.image_prompt or "").strip()
     if not img_prompt:
-        img_prompt = (generate_image_prompt(narration, visual_desc, reference_character or "") or "").strip()
+        for _attempt in range(3):
+            try:
+                img_prompt = (generate_image_prompt(narration, visual_desc, reference_character or "") or "").strip()
+                if img_prompt:
+                    break
+            except Exception as _exc:
+                _log(db, project_id,
+                     f"[Chunk {n}] ⚠️ Prompt intento {_attempt+1}/3 falló: {_exc}",
+                     stage=f"chunk_{n}_imgprompt", level="warning")
+                import time as _t; _t.sleep(3 * (2 ** _attempt))
     if not img_prompt:
         img_prompt = (narration or "").strip()[:800]
     _update_chunk(db, chunk, image_prompt=img_prompt)
@@ -1694,10 +1702,11 @@ def _run_generate_motion_prompts(project_id: int) -> None:
             .all()
         )
         for chunk in chunks:
-            if not chunk.scene_text or not chunk.image_prompt:
+            if not chunk.scene_text:
                 continue
             try:
-                prompt = motion_service.generate_motion_prompt(chunk.scene_text, chunk.image_prompt)
+                img_prompt = chunk.image_prompt or chunk.scene_text
+                prompt = motion_service.generate_motion_prompt(chunk.scene_text, img_prompt)
                 _update_chunk(db, chunk, motion_prompt=prompt)
             except Exception as e:
                 _log(db, project_id, f"Error generando motion prompt para chunk {chunk.chunk_number}: {e}", stage="motion_prompts", level="error")
@@ -1766,19 +1775,16 @@ def _animate_one_scene(project_id: int, chunk_number: int, slug: str, api_key: s
 
 
 def _run_animate_scenes(project_id: int) -> None:
-    """Animate all scenes that have images but no videos using WaveSpeed i2v.
+    """Animate all scenes using Meta AI with 5 parallel browser workers."""
+    import asyncio as _asyncio
+    from .video import meta_bot as _meta_bot
 
-    Runs max 2 concurrent animations (video generation takes 1-3 min each).
-    """
+    NUM_WORKERS = 5
+
     db = SessionLocal()
     try:
         project = db.query(Project).filter(Project.id == project_id).first()
         if not project:
-            return
-
-        ws_key = _get_wavespeed_api_key(db)
-        if not ws_key:
-            _log(db, project_id, "WAVESPEED_API_KEY no configurado.", stage="animate", level="error")
             return
 
         chunks = (
@@ -1797,41 +1803,57 @@ def _run_animate_scenes(project_id: int) -> None:
             return
 
         total = len(chunks)
+        slug = project.slug
         _log(db, project_id,
-             f"Animando {total} escenas con WaveSpeed i2v (max 2 simultaneas)...",
+             f"Animando {total} escenas con Meta AI ({NUM_WORKERS} navegadores paralelos)...",
              stage="animate")
 
-        slug = project.slug
-        chunk_numbers = [c.chunk_number for c in chunks]
+        # Build task list: (chunk_number, image_path, motion_prompt, output_path)
+        tasks = []
+        for chunk in chunks:
+            n = chunk.chunk_number
+            anim_prompt = chunk.motion_prompt or chunk.video_prompt or "Slow cinematic zoom in, subtle camera movement"
+            c_dir = chunk_dir(slug, n)
+            video_path = c_dir / "videos" / f"video_{n}.mp4"
+            video_path.parent.mkdir(parents=True, exist_ok=True)
+            tasks.append((n, str(chunk.image_path), anim_prompt, str(video_path)))
 
-        errors: list[str] = []
-        done_count = 0
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futures = {
-                pool.submit(_animate_one_scene, project_id, cn, slug, ws_key): cn
-                for cn in chunk_numbers
-            }
-            for future in as_completed(futures):
-                cn = futures[future]
-                done_count += 1
-                n_result, err = future.result()
+        # Callback to save each scene to DB immediately when done
+        def _on_scene_done(cn: int, err: str | None):
+            sdb = SessionLocal()
+            try:
+                chunk = sdb.query(Chunk).filter(
+                    Chunk.project_id == project_id, Chunk.chunk_number == cn
+                ).first()
+                if not chunk:
+                    return
                 if err:
-                    errors.append(f"Escena #{cn}: {err}")
-                    _log(db, project_id,
-                         f"Animacion escena #{cn} fallo: {err}",
-                         stage="animate_progress", level="error")
+                    chunk.status = ChunkStatus.error
+                    chunk.error_message = err
                 else:
-                    _log(db, project_id,
-                         f"Escena #{cn} animada ({done_count}/{total})",
-                         stage="animate_progress")
+                    c_dir = chunk_dir(slug, cn)
+                    chunk.video_path = str(c_dir / "videos" / f"video_{cn}.mp4")
+                    chunk.status = ChunkStatus.done
+                    chunk.error_message = None
+                chunk.updated_at = datetime.utcnow()
+                sdb.commit()
+            finally:
+                sdb.close()
 
+        # Run all tasks with parallel browsers
+        results = _asyncio.run(_meta_bot.animate_batch(
+            tasks, num_workers=NUM_WORKERS, on_scene_done=_on_scene_done
+        ))
+
+        done_count = sum(1 for _, e in results if e is None)
+        errors = [f"Escena #{cn}: {e}" for cn, e in results if e is not None]
         if errors:
             _log(db, project_id,
-                 f"Animacion completada con {len(errors)} error(es): {'; '.join(errors[:3])}",
+                 f"Animacion: {done_count}/{total} exitosas, {len(errors)} error(es): {'; '.join(errors[:3])}",
                  stage="animate_done", level="error")
         else:
             _log(db, project_id,
-                 f"{total} escenas animadas con WaveSpeed.",
+                 f"{total} escenas animadas con Meta AI ({NUM_WORKERS} paralelos).",
                  stage="animate_done")
 
     except Exception as exc:

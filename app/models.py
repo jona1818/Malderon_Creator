@@ -18,6 +18,7 @@ class ProjectStatus(str, enum.Enum):
     scenes_ready = "scenes_ready"
     generating_images = "generating_images"
     images_ready = "images_ready"
+    rendering = "rendering"
     done = "done"
     error = "error"
 
@@ -68,6 +69,7 @@ class Project(Base):
     voiceover_path = Column(String(512), nullable=True)    # path to audio-completo.mp3
     error_message = Column(Text, nullable=True)
     final_video_path = Column(String(512), nullable=True)
+    render_progress = Column(Integer, default=0)            # 0-100 render %
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -91,6 +93,8 @@ class Chunk(Base):
     image_path = Column(String(512), nullable=True)
     video_path = Column(String(512), nullable=True)
     rendered_path = Column(String(512), nullable=True)
+    transition = Column(String(50), nullable=True)        # xfade transition before this clip (e.g. "fade", "wipeleft")
+    transition_duration = Column(Integer, default=500)     # transition duration in ms (default 500ms)
     srt_path = Column(String(512), nullable=True)
     start_ms = Column(Integer, nullable=True)    # scene start in milliseconds
     end_ms = Column(Integer, nullable=True)      # scene end in milliseconds

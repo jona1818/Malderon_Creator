@@ -1,0 +1,1 @@
+[0:v][1:v]xfade=transition=fadewhite:duration=0.500:offset=1.500[vout]

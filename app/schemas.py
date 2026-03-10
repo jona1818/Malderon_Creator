@@ -30,6 +30,8 @@ class ChunkOut(BaseModel):
     motion_prompt: Optional[str] = None
     video_path: Optional[str]
     rendered_path: Optional[str]
+    transition: Optional[str] = None
+    transition_duration: Optional[int] = 500
     start_ms: Optional[int] = None
     end_ms: Optional[int] = None
 
@@ -60,6 +62,7 @@ class ProjectOut(BaseModel):
     voiceover_path: Optional[str] = None
     error_message: Optional[str]
     final_video_path: Optional[str]
+    render_progress: int = 0
     created_at: datetime
     updated_at: datetime
     chunks: List[ChunkOut] = []

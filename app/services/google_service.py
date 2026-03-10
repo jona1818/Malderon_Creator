@@ -31,7 +31,10 @@ def _chat(system: str, user: str, max_tokens: int = 4096) -> str:
             {"role": "user", "content": user},
         ],
     )
-    return resp.choices[0].message.content.strip()
+    content = resp.choices[0].message.content
+    if content is None:
+        raise RuntimeError("OpenRouter returned empty content (None)")
+    return content.strip()
 
 
 # ── Batch Image Prompt Generation ────────────────────────────────────────────
@@ -103,7 +106,7 @@ def batch_generate_image_prompts(
     raw = re.sub(r"\s*```$", "", raw)
     data = json.loads(raw)
 
-    return {item["scene_number"]: item["image_prompt"] for item in data["prompts"]}
+    return {int(item["scene_number"]): item["image_prompt"] for item in data["prompts"]}
 
 
 # ── Batch Video Prompt Generation (Motion Instructions) ──────────────────────
@@ -151,7 +154,7 @@ def batch_generate_video_prompts(
     raw = re.sub(r"\s*```$", "", raw)
     data = json.loads(raw)
 
-    return {item["scene_number"]: item["video_prompt"] for item in data["prompts"]}
+    return {int(item["scene_number"]): item["video_prompt"] for item in data["prompts"]}
 
 
 # ── Image generation — Imagen 3.0 (kept for compatibility but Pollinations is primary) ──

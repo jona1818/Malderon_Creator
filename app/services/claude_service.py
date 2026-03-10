@@ -29,7 +29,10 @@ def _chat(system: str, user: str, model: str = _MODEL_SMART, max_tokens: int = 8
             {"role": "user",   "content": user},
         ],
     )
-    return resp.choices[0].message.content.strip()
+    content = resp.choices[0].message.content
+    if content is None:
+        raise RuntimeError("OpenRouter returned empty content (None)")
+    return content.strip()
 
 # ── Root path (two levels up from this file: app/services/ → root) ────────────
 _ROOT = Path(__file__).resolve().parent.parent.parent

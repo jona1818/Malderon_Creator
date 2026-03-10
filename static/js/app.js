@@ -8,6 +8,13 @@ let pollInterval = null;
 let logEventSource = null;
 let lastLogId = 0;
 
+// Track which chunk cards are expanded (survives re-renders)
+const _openChunks = new Set();
+const _openPrompts = new Set();
+
+// Store chunk data for modal access (keyed by chunk_number)
+const _chunkData = {};
+
 // Cached settings (loaded on demand)
 let _settings = {};
 
@@ -30,6 +37,7 @@ const STATUS_ICONS = {
   scenes_ready: '🎬',
   generating_images: '🖼️',
   images_ready: '✅',
+  rendering: '🎬',
   done: '✅',
   error: '❌',
 };
@@ -50,9 +58,13 @@ function showView(name, projectId = null) {
 
   stopPolling();
   stopLogs();
+  // Stop editing-specific resources
+  if (_editingLogSource) { _editingLogSource.close(); _editingLogSource = null; }
+  if (editingPollInterval) { clearInterval(editingPollInterval); editingPollInterval = null; }
 
   if (name === 'dashboard') loadDashboard();
   if (name === 'detail' && projectId) openDetail(projectId);
+  if (name === 'editing' && projectId) openEditing(projectId);
   if (name === 'settings') loadSettingsPage();
 }
 
@@ -138,9 +150,13 @@ async function openDetail(projectId) {
   document.getElementById('chunksList').innerHTML = '';
   document.getElementById('logsContainer').innerHTML = '<div class="log-placeholder">Cargando logs\u2026</div>';
 
-  await refreshDetail(projectId);
+  const p = await refreshDetail(projectId);
 
-  startLogStream(projectId);
+  // Only stream logs if project is actively processing (not done)
+  const activeStates = ['queued', 'rendering', 'generating', 'processing', 'generating_images', 'generating_videos'];
+  if (p && activeStates.includes(p.status)) {
+    startLogStream(projectId);
+  }
   pollInterval = setInterval(() => refreshDetail(projectId), 4000);
 }
 
@@ -157,7 +173,7 @@ async function refreshDetail(projectId) {
 
     // ── Progress card (queued / processing / error) ───────────────────────
     const progressCard = document.getElementById('progressCard');
-    const isRunning = ['queued', 'processing', 'error'].includes(p.status);
+    const isRunning = ['queued', 'processing', 'rendering', 'error'].includes(p.status);
     progressCard.style.display = isRunning ? '' : 'none';
     if (isRunning) {
       const total = chunks.length;
@@ -271,7 +287,10 @@ async function refreshDetail(projectId) {
     const isGeneratingImages = p.status === 'generating_images';
     const isImagesReady = p.status === 'images_ready';
     const isErrorWithVO = p.status === 'error' && !!p.voiceover_path;
-    const showImagePanel = isScenesReady || isGeneratingImages || isImagesReady;
+    const isRendering = p.status === 'rendering';
+    const isDone = p.status === 'done';
+    const isErrorWithMedia = p.status === 'error' && chunks.some(c => c.image_path || c.video_path);
+    const showImagePanel = isScenesReady || isGeneratingImages || isImagesReady || isRendering || isDone || isErrorWithMedia;
     const hasVoiceover = !!p.voiceover_path;
 
     if (approvalSection && hasVoiceover) {
@@ -316,112 +335,103 @@ async function refreshDetail(projectId) {
       chunksSection.style.display = '';
       const countEl = document.getElementById('chunksCount');
       if (countEl) {
-        if (showImagePanel) {
-          const doneImgs = chunks.filter(c => c.image_path).length;
-          countEl.textContent = doneImgs > 0
-            ? `— ${chunks.length} escenas · ${doneImgs} con imagen`
-            : `— ${chunks.length} escenas`;
-        } else {
-          countEl.textContent = `— ${chunks.length} escenas`;
-        }
+        const doneImgs = chunks.filter(c => c.image_path).length;
+        const doneVids = chunks.filter(c => c.video_path).length;
+        let parts = [`${chunks.length} escenas`];
+        if (doneImgs > 0) parts.push(`${doneImgs} img`);
+        if (doneVids > 0) parts.push(`${doneVids} vid`);
+        countEl.textContent = `— ${parts.join(' · ')}`;
       }
 
       const list = document.getElementById('chunksList');
-      list.innerHTML = '';
-      chunks.forEach(c => {
-        const text = c.scene_text || '';
-        const preview = text.length > 100 ? text.slice(0, 100) + '…' : text;
-        const chars = text.length.toLocaleString('es-ES');
 
-        // Timing info from start_ms / end_ms
-        let timeHtml = '';
-        if (c.start_ms != null && c.end_ms != null) {
-          const fmtTime = (ms) => {
-            const totalSec = Math.floor(ms / 1000);
-            const m = Math.floor(totalSec / 60);
-            const s = totalSec % 60;
-            return `${m}:${String(s).padStart(2, '0')}`;
-          };
-          const durSec = ((c.end_ms - c.start_ms) / 1000).toFixed(1);
-          timeHtml = `<span class="chunk-card-time">${fmtTime(c.start_ms)} — ${fmtTime(c.end_ms)}</span><span class="chunk-card-dur">${durSec}s</span>`;
-        }
+      const _fmtTime = (ms) => {
+        const totalSec = Math.floor(ms / 1000);
+        const m = Math.floor(totalSec / 60);
+        const s = totalSec % 60;
+        return `${m}:${String(s).padStart(2, '0')}`;
+      };
 
-        // Image thumbnail — use the dedicated API endpoint to avoid Windows path issues
-        let imgHtml = '';
-        if (c.image_path) {
-          imgHtml = `<img class="chunk-img-thumb" src="/api/projects/${p.id}/chunk/${c.chunk_number}/image?t=${Date.now()}" alt="Escena ${c.chunk_number}" loading="lazy" />`;
-        }
+      // Build a fingerprint per chunk to detect changes
+      const newFingerprint = chunks.map(c =>
+        `${c.chunk_number}:${c.status}:${c.image_path||''}:${c.video_path||''}:${c.image_prompt||''}:${c.motion_prompt||''}`
+      ).join('|');
 
-        // Generated image prompt (collapsible)
-        let promptHtml = '';
-        if (c.image_prompt) {
-          promptHtml = `
-            <div class="chunk-prompt-section">
-              <div class="chunk-prompt-header" onclick="toggleChunkPrompt(${c.chunk_number})">
-                <span>🔎 Prompt generado</span>
-                <span class="chunk-prompt-toggle" id="prompt-toggle-${c.chunk_number}">▼</span>
-              </div>
-              <div class="chunk-prompt-body" id="prompt-body-${c.chunk_number}" style="display:none">${escHtml(c.image_prompt)}</div>
+      // Only rebuild if data actually changed
+      if (list.dataset.fingerprint === newFingerprint && list.children.length > 0) {
+        // No changes — skip rebuild to avoid image flicker
+      } else {
+        list.dataset.fingerprint = newFingerprint;
+        list.innerHTML = '';
+
+        chunks.forEach(c => {
+          const n = c.chunk_number;
+          const text = c.scene_text || '';
+          const imgUrl = c.image_path ? `/api/projects/${p.id}/chunk/${n}/image` : '';
+          const vidUrl = c.video_path ? `/api/projects/${p.id}/chunk/${n}/video` : '';
+
+          // Time
+          let timeHtml = '<span class="st-time-val">—</span>';
+          if (c.start_ms != null && c.end_ms != null) {
+            const durSec = ((c.end_ms - c.start_ms) / 1000).toFixed(1);
+            timeHtml = `<span class="st-time-val">${_fmtTime(c.start_ms)}-${_fmtTime(c.end_ms)}</span><br><span class="st-dur">${durSec}s</span>`;
+          }
+
+          // Store chunk data for modal access
+          _chunkData[n] = { image_prompt: c.image_prompt || '', motion_prompt: c.motion_prompt || '', scene_text: c.scene_text || '' };
+
+          // Image cell
+          const imgCell = imgUrl
+            ? `<img class="st-thumb" src="${imgUrl}" alt="Escena ${n}" loading="lazy" onclick="openImagePreview('${imgUrl}', ${n})" />`
+            : `<div class="st-thumb-empty">—</div>`;
+
+          // Video cell
+          let vidCell = `<div class="st-thumb-empty">—</div>`;
+          if (vidUrl) {
+            vidCell = `<div class="st-vid-wrap" onclick="openVideoPreview('${vidUrl}', ${n})">
+              <video src="${vidUrl}" preload="metadata" muted></video>
+              <div class="st-vid-play">&#9654;</div>
             </div>`;
-        }
+          }
 
-        // Error message
-        let errorHtml = '';
-        if (c.status === 'error' && c.error_message) {
-          errorHtml = `<div class="chunk-error-box">${escHtml(c.error_message)}</div>`;
-        }
+          // Prompt tags (hover to see full text)
+          let promptTags = '';
+          if (c.image_prompt) {
+            promptTags += `<span class="st-prompt-tag" title="${escHtml(c.image_prompt)}">IMG</span>`;
+          }
+          if (c.motion_prompt) {
+            promptTags += `<span class="st-prompt-tag" title="${escHtml(c.motion_prompt)}">MOV</span>`;
+          }
 
-        // Retry button (visible when error and in image generation phase)
-        let retryHtml = '';
-        if (c.status === 'error' && showImagePanel) {
-          retryHtml = `<button class="chunk-retry-btn" onclick="retryChunkImage(${c.chunk_number})">🔄 Reintentar imagen</button>`;
-        }
+          // Status
+          const statusLabel = c.status === 'done' ? 'done' : c.status === 'processing' ? 'proc' : c.status === 'error' ? 'error' : c.status;
 
-        // Pollinations regenerate button (visible when image_prompt exists and in image panel)
-        let regenHtml = '';
-        if (c.image_prompt && showImagePanel) {
-          regenHtml = `<button class="chunk-regen-btn" onclick="regenerateImageGenaipro(${c.chunk_number})">⚡ Rehacer Imagen (${_imgProviderName()})</button>`;
-        }
+          // Action buttons
+          let actions = '';
+          if (c.image_prompt) {
+            actions += `<button class="st-action-btn" title="Rehacer imagen" onclick="event.stopPropagation(); regenerateImageGenaipro(${n})">&#x1F504;</button>`;
+          }
+          if (c.image_path) {
+            actions += `<button class="st-action-btn" title="Reanimar video" onclick="event.stopPropagation(); retryMetaAnimation(${n})">&#x26A1;</button>`;
+          }
 
-        // Motion Prompt logic (visible if project is in a state where it generated images)
-        let motionHtml = '';
-        if (p.status === 'images_ready' || p.status === 'done' || p.status === 'error' || p.status === 'animating' || p.status === 'motion_prompts_ready') {
-          const motionVal = c.motion_prompt || '';
-          motionHtml = `
-            <div class="chunk-motion-section" style="margin-top:10px;">
-              <div style="font-size:12px; font-weight:600; margin-bottom:4px;">🎥 Movimiento:</div>
-              <div style="display:flex; gap:8px;">
-                <textarea id="motion_prompt_${c.chunk_number}" rows="2" style="flex:1; padding:4px; font-size:12px; border:1px solid var(--border-color); border-radius:4px; background:var(--bg-card); color:var(--text-main);">${escHtml(motionVal)}</textarea>
-                <button class="btn btn-ghost btn-sm" onclick="saveMotionPrompt(${c.chunk_number})">💾</button>
-              </div>
-            </div>`;
-        }
-
-        const card = document.createElement('div');
-        card.className = 'chunk-card';
-        card.innerHTML = `
-          <div class="chunk-card-header" onclick="toggleChunkCard(${c.chunk_number})">
-            <span class="chunk-card-num">Escena #${c.chunk_number}</span>
-            ${c.image_path ? '<span class="chunk-img-badge">🖼️</span>' : ''}
-            <span class="chunk-card-preview">${escHtml(preview)}</span>
-            <span class="chunk-card-chars">${chars} chars</span>
-            ${timeHtml}
-            <span class="chunk-card-status ${c.status}">${c.status}</span>
-            <span class="chunk-card-toggle" id="toggle-${c.chunk_number}">▼</span>
-          </div>
-          <div class="chunk-card-body" id="chunk-body-${c.chunk_number}" style="display:none">
-            ${imgHtml}
-            ${promptHtml}
-            ${motionHtml}
-            ${c.video_path ? `<div style="margin-top:10px"><video src="/api/projects/${p.id}/chunk/${c.chunk_number}/video?t=${Date.now()}" controls style="max-width:100%"></video></div>` : ''}
-            ${errorHtml}
-            ${retryHtml}
-            ${regenHtml}
-            <div class="chunk-card-text">${escHtml(text)}</div>
-          </div>
-        `;
-        list.appendChild(card);
-      });
+          const row = document.createElement('div');
+          row.className = 'scene-row';
+          row.innerHTML = `
+            <div class="st-col st-num">${n}</div>
+            <div class="st-col st-img">${imgCell}</div>
+            <div class="st-col st-text">
+              <div class="st-script">${escHtml(text)}</div>
+              ${promptTags ? `<div class="st-prompts">${promptTags}</div>` : ''}
+            </div>
+            <div class="st-col st-vid">${vidCell}</div>
+            <div class="st-col st-time">${timeHtml}</div>
+            <div class="st-col st-status"><span class="st-status-badge ${c.status}">${statusLabel}</span></div>
+            <div class="st-col st-actions">${actions}</div>
+          `;
+          list.appendChild(row);
+        });
+      }
     } else {
       chunksSection.style.display = 'none';
     }
@@ -545,16 +555,24 @@ async function refreshDetail(projectId) {
       }
     }
 
-    // ── 5. Video final ────────────────────────────────────────────────────
-    if (p.final_video_path) {
-      const container = document.getElementById('videoPreviewContainer');
-      const video = document.getElementById('videoPreview');
-      const relPath = p.final_video_path.replace(/\\/g, '/').split('/projects/').pop();
-      video.src = `/media/${relPath}`;
-      container.style.display = '';
-    } else {
-      document.getElementById('videoPreviewContainer').style.display = 'none';
+    // ── 5. "Ir a Edición" button — visible when videos/images exist ──────
+    const goToEditingSection = document.getElementById('goToEditingSection');
+    const doneVideos = chunks.filter(c => c.video_path).length;
+    const hasVideos = doneVideos > 0;
+    const showEditing = ['images_ready', 'rendering', 'done', 'error'].includes(p.status) && hasVideos;
+    if (goToEditingSection) {
+      goToEditingSection.style.display = showEditing ? '' : 'none';
+      const btn = document.getElementById('goToEditingBtn');
+      if (btn) {
+        if (p.final_video_path) btn.textContent = '🎬 Ir a Edición — Video Final Listo ✅';
+        else if (p.status === 'rendering') btn.textContent = '🎬 Ir a Edición — Renderizando…';
+        else btn.textContent = '🎬 Ir a Edición — Renderizar Video Final';
+      }
     }
+
+    // ── Legacy video preview container ────────────────────────────────────
+    const legacyContainer = document.getElementById('videoPreviewContainer');
+    if (legacyContainer) legacyContainer.style.display = 'none';
 
     // ── Stop polling when in stable state ─────────────────────────────────
     if (['done', 'error', 'awaiting_approval', 'awaiting_voice_config', 'awaiting_audio_approval', 'audio_approved', 'scenes_ready', 'images_ready'].includes(p.status)) {
@@ -562,8 +580,10 @@ async function refreshDetail(projectId) {
       const animating = p.status === 'images_ready' && chunks.some(c => c.image_path && !c.video_path);
       if (!animating) stopPolling();
     }
+    return p;
   } catch (e) {
     console.error('refreshDetail error:', e);
+    return null;
   }
 }
 
@@ -623,6 +643,11 @@ function appendLog(log) {
 
 function clearLogs() {
   document.getElementById('logsContainer').innerHTML = '';
+}
+
+function toggleLogs() {
+  const el = document.getElementById('detailLogs');
+  if (el) el.classList.toggle('collapsed');
 }
 
 function stopLogs() {
@@ -916,6 +941,7 @@ function toggleChunkCard(num) {
   if (!body) return;
   const open = body.style.display === 'none';
   body.style.display = open ? '' : 'none';
+  if (open) _openChunks.add(num); else _openChunks.delete(num);
   if (icon) {
     icon.textContent = open ? '▲' : '▼';
     icon.classList.toggle('open', open);
@@ -928,6 +954,7 @@ function toggleChunkPrompt(num) {
   if (!body) return;
   const open = body.style.display === 'none';
   body.style.display = open ? '' : 'none';
+  if (open) _openPrompts.add(num); else _openPrompts.delete(num);
   if (icon) icon.textContent = open ? '▲' : '▼';
 }
 
@@ -968,6 +995,162 @@ async function regenerateImageGenaipro(chunkNumber) {
     showToast('Error al regenerar: ' + e.message, 'error');
     btn.disabled = false;
     btn.textContent = origText;
+  }
+}
+
+// ── Image & Video Preview Modals ──────────────────────────────────────────
+let _videoModalSceneNum = null;
+
+function openVideoPreview(url, sceneNum) {
+  _videoModalSceneNum = sceneNum;
+  const prompt = (_chunkData[sceneNum] || {}).motion_prompt || '';
+  const modal = document.getElementById('videoPreviewModal');
+  const player = document.getElementById('videoPreviewPlayer');
+  const label = document.getElementById('videoModalLabel');
+  const textarea = document.getElementById('videoModalPrompt');
+  player.src = url;
+  label.textContent = `Prompt de animación — Escena #${sceneNum}`;
+  textarea.value = prompt;
+  modal.style.display = '';
+}
+
+async function saveMotionPromptFromModal() {
+  if (!currentProjectId || !_videoModalSceneNum) return;
+  const textarea = document.getElementById('videoModalPrompt');
+  if (!textarea) return;
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/chunk/${_videoModalSceneNum}/motion-prompt`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ motion_prompt: textarea.value })
+    });
+    showToast(`Prompt de animación #${_videoModalSceneNum} guardado`, 'success');
+  } catch (e) {
+    showToast('Error al guardar: ' + e.message, 'error');
+  }
+}
+
+async function saveAndRegenerateVideo() {
+  if (!currentProjectId || !_videoModalSceneNum) return;
+  const textarea = document.getElementById('videoModalPrompt');
+  if (textarea) {
+    try {
+      await apiFetch(`/api/projects/${currentProjectId}/chunk/${_videoModalSceneNum}/motion-prompt`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ motion_prompt: textarea.value })
+      });
+    } catch (e) { /* prompt save failed, still try regenerate */ }
+  }
+  closeVideoModal();
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/start-animation`, { method: 'POST' });
+    showToast(`🔄 Re-animando escena #${_videoModalSceneNum} con Meta AI…`, 'info');
+    stopPolling();
+    await refreshDetail(currentProjectId);
+    pollInterval = setInterval(() => refreshDetail(currentProjectId), 5000);
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+  }
+}
+
+function closeVideoModal(e) {
+  if (e && e.target !== e.currentTarget && !e.target.classList.contains('video-modal-close')) return;
+  const modal = document.getElementById('videoPreviewModal');
+  const player = document.getElementById('videoPreviewPlayer');
+  player.pause();
+  player.src = '';
+  modal.style.display = 'none';
+}
+
+function openImagePreview(url, sceneNum) {
+  const data = _chunkData[sceneNum] || {};
+  const prompt = data.image_prompt || '';
+  const sceneText = data.scene_text || '';
+  const displayPrompt = prompt || sceneText;
+  const missingPrompt = !prompt && sceneText;
+  const overlay = document.createElement('div');
+  overlay.className = 'image-modal';
+  overlay.innerHTML = `
+    <div class="media-modal-content" onclick="event.stopPropagation()">
+      <button class="video-modal-close" onclick="this.closest('.image-modal').remove()">&times;</button>
+      <img src="${url}" alt="Escena #${sceneNum}" style="width:100%;border-radius:8px;" />
+      <div class="modal-prompt-section">
+        <label class="modal-prompt-label">Prompt de imagen — Escena #${sceneNum}${missingPrompt ? ' <span style="color:var(--yellow);font-weight:400">(usando texto de escena — sin prompt guardado)</span>' : ''}</label>
+        <textarea id="modal_image_prompt_${sceneNum}" class="modal-prompt-textarea" rows="3">${escHtml(displayPrompt)}</textarea>
+        <div class="modal-prompt-actions">
+          <button class="btn btn-ghost btn-sm" onclick="saveImagePromptFromModal(${sceneNum})">💾 Guardar prompt</button>
+          <button class="btn btn-primary btn-sm" onclick="saveAndRegenerateImage(${sceneNum})">🔄 Regenerar imagen</button>
+        </div>
+      </div>
+    </div>
+  `;
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  document.body.appendChild(overlay);
+}
+
+async function saveImagePromptFromModal(chunkNumber) {
+  if (!currentProjectId) return;
+  const textarea = document.getElementById(`modal_image_prompt_${chunkNumber}`);
+  if (!textarea) return;
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/chunk/${chunkNumber}/image-prompt`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_prompt: textarea.value })
+    });
+    showToast(`Prompt de imagen #${chunkNumber} guardado`, 'success');
+  } catch (e) {
+    showToast('Error al guardar: ' + e.message, 'error');
+  }
+}
+
+async function saveAndRegenerateImage(chunkNumber) {
+  if (!currentProjectId) return;
+  const textarea = document.getElementById(`modal_image_prompt_${chunkNumber}`);
+  if (textarea) {
+    try {
+      await apiFetch(`/api/projects/${currentProjectId}/chunk/${chunkNumber}/image-prompt`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_prompt: textarea.value })
+      });
+    } catch (e) { /* prompt save failed, still try regenerate */ }
+  }
+  // Close modal
+  document.querySelectorAll('.image-modal').forEach(m => m.remove());
+  // Regenerate
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/scenes/${chunkNumber}/regenerate-genaipro`, { method: 'POST' });
+    showToast(`🔄 Regenerando imagen #${chunkNumber}…`, 'info');
+    stopPolling();
+    await refreshDetail(currentProjectId);
+    pollInterval = setInterval(() => refreshDetail(currentProjectId), 3000);
+  } catch (e) {
+    showToast('Error al regenerar: ' + e.message, 'error');
+  }
+}
+
+// Close video modal with Escape key
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    const vm = document.getElementById('videoPreviewModal');
+    if (vm && vm.style.display !== 'none') closeVideoModal();
+    document.querySelectorAll('.image-modal').forEach(m => m.remove());
+  }
+});
+
+async function retryMetaAnimation(chunkNumber) {
+  if (!currentProjectId) return;
+  try {
+    // Clear video_path and re-trigger animation for this chunk
+    await apiFetch(`/api/projects/${currentProjectId}/start-animation`, { method: 'POST' });
+    showToast(`Re-animando escena #${chunkNumber} con Meta AI…`, 'info');
+    stopPolling();
+    await refreshDetail(currentProjectId);
+    pollInterval = setInterval(() => refreshDetail(currentProjectId), 5000);
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
   }
 }
 
@@ -2190,18 +2373,691 @@ async function continueWithVideo() {
 async function startVeo3Animation() {
   if (!currentProjectId) return;
   const btn = document.getElementById('startVeo3AnimationBtn');
-  const origText = btn ? btn.textContent : '🎬 Animar con WaveSpeed';
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Iniciando WaveSpeed…'; }
+  const origText = btn ? btn.textContent : '🤖 Animar con Meta AI';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Iniciando Meta AI…'; }
 
   try {
     await apiFetch(`/api/projects/${currentProjectId}/start-animation`, { method: 'POST' });
-    showToast('🎬 Animación con WaveSpeed iniciada (máx. 2 simultáneas). Revisa los logs.', 'success');
+    showToast('🤖 Animación con Meta AI iniciada (5 navegadores paralelos). Revisa los logs.', 'success');
     stopPolling();
     await refreshDetail(currentProjectId);
     pollInterval = setInterval(() => refreshDetail(currentProjectId), 5000);
   } catch (e) {
     showToast('Error al iniciar animación: ' + e.message, 'error');
     if (btn) { btn.disabled = false; btn.textContent = origText; }
+  }
+}
+
+// ── Editing View ─────────────────────────────────────────────────────────
+let editingPollInterval = null;
+let _editingChunks = [];   // current chunk order for drag-and-drop
+let _dragSrcIdx = null;    // index being dragged
+let _canvasPlayer = null;  // CanvasPlayer instance
+
+async function openEditing(projectId) {
+  currentProjectId = projectId;
+  stopPolling();
+  if (editingPollInterval) { clearInterval(editingPollInterval); editingPollInterval = null; }
+  await refreshEditing(projectId);
+  // Only start log stream if actively rendering (not on every open)
+}
+
+let _editingLogSource = null;
+
+function startEditingLogStream(projectId) {
+  const container = document.getElementById('editingLogsContainer');
+  const card = document.getElementById('editingLogsCard');
+  if (!container) return;
+  // Only stream if the logs card is visible (i.e., during rendering)
+  if (card && card.style.display === 'none') return;
+
+  // Stop previous SSE if any
+  if (_editingLogSource) { _editingLogSource.close(); _editingLogSource = null; }
+
+  container.innerHTML = '';
+
+  // Use SSE for real-time log streaming
+  _editingLogSource = new EventSource(`/api/logs/${projectId}/stream`);
+  _editingLogSource.onmessage = (e) => {
+    try {
+      const l = JSON.parse(e.data);
+      const div = document.createElement('div');
+      div.className = `log-line ${l.level || 'info'}`;
+      const ts = new Date(l.timestamp).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      div.innerHTML = `<span class="log-ts">${ts}</span><span class="log-stage">[${l.stage || ''}]</span><span class="log-msg">${escHtml(l.message)}</span>`;
+      container.appendChild(div);
+      // Keep max 200 lines
+      while (container.children.length > 200) container.removeChild(container.firstChild);
+      container.scrollTop = container.scrollHeight;
+    } catch (_) {}
+  };
+  _editingLogSource.onerror = () => {
+    // Reconnect after a delay
+    if (_editingLogSource) _editingLogSource.close();
+    _editingLogSource = null;
+  };
+}
+
+async function refreshEditing(projectId) {
+  try {
+    const p = await apiFetch(`/api/projects/${projectId}`);
+    const chunks = p.chunks || [];
+    _editingChunks = chunks.slice(); // copy for reorder
+
+    // Header
+    document.getElementById('editingTitle').textContent = `Edición — ${p.title}`;
+    const badge = document.getElementById('editingBadge');
+    if (badge) { badge.textContent = p.status.toUpperCase(); badge.className = `badge badge-${p.status}`; }
+
+    // Stats
+    const clipCount = document.getElementById('editingClipCount');
+    const doneVids = chunks.filter(c => c.video_path).length;
+    const doneImgs = chunks.filter(c => c.image_path).length;
+    const totalDurMs = chunks.reduce((s, c) => s + ((c.end_ms || 0) - (c.start_ms || 0)), 0);
+    const totalDurStr = _fmtDuration(totalDurMs);
+    if (clipCount) clipCount.textContent = `${chunks.length} clips · ${doneVids} vid · ${doneImgs} img · ${totalDurStr}`;
+
+    // Build timeline
+    _buildTimeline(p, chunks);
+
+    // Initialize or update canvas player
+    _initCanvasPlayer(p.id, chunks);
+
+    // Render button state
+    const renderBtn = document.getElementById('editingRenderBtn');
+    const renderHint = document.getElementById('editingRenderHint');
+    const finalPreview = document.getElementById('editingFinalPreview');
+
+    const progressDiv = document.getElementById('editingRenderProgress');
+    const progressFill = document.getElementById('editingProgressFill');
+    const progressPct = document.getElementById('editingProgressPct');
+    const progressStage = document.getElementById('editingProgressStage');
+
+    // Cancel render button
+    let cancelBtn = document.getElementById('editingCancelRender');
+
+    if (p.status === 'rendering' || p.status === 'queued') {
+      renderBtn.disabled = true;
+      renderBtn.textContent = '⏳ Renderizando…';
+      renderHint.textContent = '';
+      if (finalPreview) finalPreview.style.display = 'none';
+
+      // Show cancel button
+      if (!cancelBtn) {
+        cancelBtn = document.createElement('button');
+        cancelBtn.id = 'editingCancelRender';
+        cancelBtn.className = 'btn btn-sm';
+        cancelBtn.style.cssText = 'background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid #ef4444;margin-left:8px;';
+        cancelBtn.textContent = '✕ Cancelar render';
+        cancelBtn.onclick = () => cancelRender();
+        renderBtn.parentElement.appendChild(cancelBtn);
+      }
+
+      // Show progress bar
+      const pct = p.render_progress || 0;
+      if (progressDiv) {
+        progressDiv.style.display = '';
+        progressFill.style.width = pct + '%';
+        progressPct.textContent = pct + '%';
+        // Stage label based on percentage
+        if (pct < 60) progressStage.textContent = 'Preparando clips…';
+        else if (pct < 90) progressStage.textContent = 'Aplicando transiciones…';
+        else if (pct < 98) progressStage.textContent = 'Mezclando audio…';
+        else progressStage.textContent = 'Finalizando…';
+      }
+
+      // Show logs panel and start log stream during active render
+      const logsCard = document.getElementById('editingLogsCard');
+      if (logsCard) logsCard.style.display = '';
+      startEditingLogStream(projectId);
+
+      if (!editingPollInterval) {
+        editingPollInterval = setInterval(() => {
+          refreshEditing(projectId);
+        }, 3000);
+      }
+    } else if (p.final_video_path) {
+      // Stop log stream and hide logs panel when not rendering
+      if (_editingLogSource) { _editingLogSource.close(); _editingLogSource = null; }
+      const logsCard2 = document.getElementById('editingLogsCard');
+      if (logsCard2) logsCard2.style.display = 'none';
+      if (cancelBtn) cancelBtn.remove();
+      renderBtn.textContent = '🔄 Re-renderizar';
+      renderBtn.disabled = false;
+      renderBtn.style.display = '';
+      renderHint.textContent = '✅ Listo';
+      if (progressDiv) progressDiv.style.display = 'none';
+      if (finalPreview) {
+        finalPreview.style.display = '';
+        const player = document.getElementById('editingVideoPlayer');
+        const dl = document.getElementById('editingVideoDownload');
+        const videoUrl = `/api/projects/${p.id}/final-video?t=${Date.now()}`;
+        if (player) player.src = videoUrl;
+        if (dl) dl.href = videoUrl;
+        // Also show in main preview
+        const mainPlayer = document.getElementById('editingPreviewPlayer');
+        const placeholder = document.getElementById('editingPreviewPlaceholder');
+        if (mainPlayer) { mainPlayer.src = videoUrl; mainPlayer.style.display = ''; }
+        if (placeholder) placeholder.style.display = 'none';
+      }
+      if (editingPollInterval) { clearInterval(editingPollInterval); editingPollInterval = null; }
+    } else {
+      if (_editingLogSource) { _editingLogSource.close(); _editingLogSource = null; }
+      const logsCard3 = document.getElementById('editingLogsCard');
+      if (logsCard3) logsCard3.style.display = 'none';
+      if (cancelBtn) cancelBtn.remove();
+      renderBtn.style.display = '';
+      renderBtn.disabled = false;
+      renderBtn.textContent = '🎬 Renderizar Video Final';
+      renderHint.textContent = `${doneVids} clips · ${totalDurStr}`;
+      if (progressDiv) progressDiv.style.display = 'none';
+      if (finalPreview) finalPreview.style.display = 'none';
+      // Reset main preview
+      const mainPlayer = document.getElementById('editingPreviewPlayer');
+      const placeholder = document.getElementById('editingPreviewPlaceholder');
+      if (mainPlayer) mainPlayer.style.display = 'none';
+      if (placeholder) placeholder.style.display = '';
+      if (editingPollInterval) { clearInterval(editingPollInterval); editingPollInterval = null; }
+    }
+  } catch (e) {
+    console.error('refreshEditing error:', e);
+  }
+}
+
+function _fmtDuration(ms) {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+// ── Transition definitions (CapCut-style labels) ─────────────────────────
+const TRANSITIONS = [
+  { id: 'fade',        label: 'Combinar',     icon: '🔄' },
+  { id: 'fadeblack',   label: 'Oscurecer',    icon: '⬛' },
+  { id: 'fadewhite',   label: 'Destello',     icon: '⬜' },
+  { id: 'dissolve',    label: 'Disolver',     icon: '💫' },
+  { id: 'wipeleft',    label: 'Borrar ←',     icon: '◀️' },
+  { id: 'wiperight',   label: 'Borrar →',     icon: '▶️' },
+  { id: 'slideleft',   label: 'Deslizar ←',   icon: '⏪' },
+  { id: 'slideright',  label: 'Deslizar →',   icon: '⏩' },
+  { id: 'slideup',     label: 'Deslizar ↑',   icon: '⏫' },
+  { id: 'slidedown',   label: 'Deslizar ↓',   icon: '⏬' },
+  { id: 'circleopen',  label: 'Círculo abrir', icon: '⭕' },
+  { id: 'circleclose', label: 'Círculo cerrar',icon: '🔴' },
+  { id: 'radial',      label: 'Radial',       icon: '🌀' },
+  { id: 'smoothleft',  label: 'Suave ←',      icon: '🌊' },
+  { id: 'smoothright', label: 'Suave →',      icon: '🌊' },
+  { id: 'zoomin',      label: 'Acercar',      icon: '🔍' },
+];
+
+let _activeTransitionPopup = null;
+
+function _buildTimeline(project, chunks) {
+  const timeline = document.getElementById('editingTimeline');
+  const ruler = document.getElementById('editingTimeRuler');
+  timeline.innerHTML = '';
+  if (ruler) ruler.innerHTML = '';
+
+  // Close any open transition popup
+  _closeTransitionPopup();
+
+  const PX_PER_SEC = 12;
+  let accMs = 0;
+
+  chunks.forEach((c, idx) => {
+    const n = c.chunk_number;
+    const durMs = (c.start_ms != null && c.end_ms != null) ? (c.end_ms - c.start_ms) : 3800;
+    const durSec = Math.max(durMs / 1000, 0.5);
+    const width = Math.max(Math.round(durSec * PX_PER_SEC), 30);
+    const hasVid = !!c.video_path;
+    const hasImg = !!c.image_path;
+
+    // ── Transition marker BEFORE this clip (not first) ──────────────────
+    if (idx > 0) {
+      const marker = document.createElement('div');
+      marker.className = 'transition-marker' + (c.transition ? ' has-transition' : '');
+      marker.dataset.chunkNumber = n;
+      marker.dataset.idx = idx;
+      marker.title = c.transition
+        ? `Transición: ${_transitionLabel(c.transition)}`
+        : 'Agregar transición';
+
+      if (c.transition) {
+        const tr = TRANSITIONS.find(t => t.id === c.transition);
+        marker.innerHTML = `<span class="transition-marker-icon">${tr ? tr.icon : '🔄'}</span>`;
+      } else {
+        marker.innerHTML = `<span class="transition-marker-icon">+</span>`;
+      }
+
+      marker.addEventListener('click', (e) => {
+        e.stopPropagation();
+        _openTransitionPopup(marker, project.id, c);
+      });
+      timeline.appendChild(marker);
+    }
+
+    // ── Clip ──────────────────────────────────────────────────────────────
+    const clip = document.createElement('div');
+    clip.className = `timeline-clip ${hasVid ? 'has-video' : hasImg ? '' : 'no-media'}`;
+    clip.style.width = width + 'px';
+    clip.draggable = true;
+    clip.dataset.idx = idx;
+
+    let mediaHtml = '';
+    if (hasVid) {
+      mediaHtml = `<video src="/api/projects/${project.id}/chunk/${n}/video" preload="metadata" muted></video>`;
+    } else if (hasImg) {
+      mediaHtml = `<img src="/api/projects/${project.id}/chunk/${n}/image" loading="lazy" />`;
+    } else {
+      mediaHtml = `<div style="width:100%;height:40px;background:var(--bg4);"></div>`;
+    }
+
+    clip.innerHTML = `
+      <span class="timeline-clip-num">${n}</span>
+      ${mediaHtml}
+      <div class="timeline-clip-info"><span>${durSec.toFixed(1)}s</span></div>
+    `;
+
+    clip.addEventListener('click', () => _previewClip(project.id, c));
+    clip.addEventListener('dragstart', _onDragStart);
+    clip.addEventListener('dragover', _onDragOver);
+    clip.addEventListener('dragleave', _onDragLeave);
+    clip.addEventListener('drop', _onDrop);
+    clip.addEventListener('dragend', _onDragEnd);
+
+    timeline.appendChild(clip);
+
+    // Ruler tick
+    if (ruler) {
+      const tick = document.createElement('span');
+      // Account for transition marker width (~20px) in ruler
+      if (idx > 0) {
+        const spacer = document.createElement('span');
+        spacer.style.width = '20px';
+        spacer.textContent = '';
+        ruler.appendChild(spacer);
+      }
+      tick.style.width = width + 'px';
+      tick.textContent = _fmtDuration(accMs);
+      ruler.appendChild(tick);
+    }
+    accMs += durMs;
+  });
+}
+
+function _transitionLabel(id) {
+  const t = TRANSITIONS.find(t => t.id === id);
+  return t ? t.label : id;
+}
+
+function _closeTransitionPopup() {
+  if (_activeTransitionPopup) {
+    _activeTransitionPopup.remove();
+    _activeTransitionPopup = null;
+  }
+}
+
+function _openTransitionPopup(marker, projectId, chunk) {
+  _closeTransitionPopup();
+
+  const popup = document.createElement('div');
+  popup.className = 'transition-popup';
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'transition-popup-header';
+  header.innerHTML = `<span>Transiciones</span>`;
+
+  // Remove button if transition exists
+  if (chunk.transition) {
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'btn-transition-remove';
+    removeBtn.textContent = '✕ Quitar';
+    removeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      _setTransition(projectId, chunk.chunk_number, null, 500);
+    });
+    header.appendChild(removeBtn);
+  }
+  popup.appendChild(header);
+
+  // Duration slider
+  const durRow = document.createElement('div');
+  durRow.className = 'transition-dur-row';
+  const currentDur = chunk.transition_duration || 500;
+  durRow.innerHTML = `
+    <label>Duración: <strong id="trDurLabel">${(currentDur / 1000).toFixed(1)}s</strong></label>
+    <input type="range" id="trDurSlider" min="200" max="2000" step="100" value="${currentDur}" />
+  `;
+  popup.appendChild(durRow);
+
+  // Wire up slider label
+  setTimeout(() => {
+    const slider = document.getElementById('trDurSlider');
+    const label = document.getElementById('trDurLabel');
+    if (slider && label) {
+      slider.addEventListener('input', () => {
+        label.textContent = (parseInt(slider.value) / 1000).toFixed(1) + 's';
+      });
+    }
+  }, 0);
+
+  // Grid of transitions
+  const grid = document.createElement('div');
+  grid.className = 'transition-grid';
+
+  TRANSITIONS.forEach(tr => {
+    const item = document.createElement('div');
+    item.className = 'transition-item' + (chunk.transition === tr.id ? ' active' : '');
+    item.innerHTML = `
+      <div class="transition-item-icon">${tr.icon}</div>
+      <div class="transition-item-label">${tr.label}</div>
+    `;
+    item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const dur = parseInt(document.getElementById('trDurSlider')?.value || '500');
+      _setTransition(projectId, chunk.chunk_number, tr.id, dur);
+    });
+    grid.appendChild(item);
+  });
+  popup.appendChild(grid);
+
+  // Position popup fixed above marker (avoid overflow clipping)
+  const rect = marker.getBoundingClientRect();
+  popup.style.position = 'fixed';
+  popup.style.left = Math.max(10, rect.left - 120) + 'px';
+  popup.style.bottom = (window.innerHeight - rect.top + 8) + 'px';
+  popup.style.zIndex = '200';
+
+  document.body.appendChild(popup);
+  _activeTransitionPopup = popup;
+
+  // Close on outside click
+  setTimeout(() => {
+    document.addEventListener('click', _handleTransitionOutsideClick);
+  }, 0);
+}
+
+function _handleTransitionOutsideClick(e) {
+  if (_activeTransitionPopup && !_activeTransitionPopup.contains(e.target) &&
+      !e.target.closest('.transition-marker')) {
+    _closeTransitionPopup();
+    document.removeEventListener('click', _handleTransitionOutsideClick);
+  }
+}
+
+async function _setTransition(projectId, chunkNumber, transition, duration) {
+  try {
+    await apiFetch(`/api/projects/${projectId}/chunk/${chunkNumber}/transition`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transition, duration }),
+    });
+    const label = transition ? _transitionLabel(transition) : 'ninguna';
+    showToast(`Transición: ${label}`, 'success');
+    _closeTransitionPopup();
+    document.removeEventListener('click', _handleTransitionOutsideClick);
+    // Refresh to rebuild timeline
+    await refreshEditing(projectId);
+    // Play transition preview in canvas player
+    if (_canvasPlayer && transition) {
+      _canvasPlayer.seekToTransition(chunkNumber);
+      _showPlayerControls();
+    }
+  } catch (e) {
+    showToast('Error al guardar transición: ' + e.message, 'error');
+  }
+}
+
+// ── Bulk transition popup ──────────────────────────────────────────────────
+let _bulkTransitionPopup = null;
+
+function openBulkTransitionPopup() {
+  if (!currentProjectId) return;
+  closeBulkTransitionPopup();
+
+  const btn = document.getElementById('btnBulkTransition');
+  const popup = document.createElement('div');
+  popup.className = 'bulk-transition-popup';
+
+  let html = `<div class="transition-popup-header">
+    <span>🔀 Transición para todos</span>
+    <button class="btn-transition-remove" onclick="applyBulkTransition(null, 500)">✕ Quitar todas</button>
+  </div>`;
+
+  html += `<div class="transition-dur-row">
+    <label>Duración:</label>
+    <input type="range" id="bulkTransDur" min="200" max="2000" step="100" value="500" />
+    <span id="bulkTransDurLabel">500ms</span>
+  </div>`;
+
+  html += `<div class="transition-grid">`;
+  TRANSITIONS.forEach(tr => {
+    html += `<div class="transition-item" onclick="applyBulkTransition('${tr.id}', document.getElementById('bulkTransDur').value)">
+      <span class="transition-item-icon">${tr.icon}</span>
+      <span class="transition-item-label">${tr.label}</span>
+    </div>`;
+  });
+  html += `</div>`;
+
+  popup.innerHTML = html;
+
+  // Position below the button
+  const rect = btn.getBoundingClientRect();
+  const container = btn.closest('.timeline-toolbar') || btn.parentElement;
+  popup.style.position = 'fixed';
+  popup.style.top = (rect.bottom + 4) + 'px';
+  popup.style.left = rect.left + 'px';
+
+  document.body.appendChild(popup);
+  _bulkTransitionPopup = popup;
+
+  // Duration slider label
+  const slider = popup.querySelector('#bulkTransDur');
+  const label = popup.querySelector('#bulkTransDurLabel');
+  slider.addEventListener('input', () => { label.textContent = slider.value + 'ms'; });
+
+  // Close on outside click
+  setTimeout(() => document.addEventListener('click', _handleBulkTransitionOutside), 10);
+}
+
+function closeBulkTransitionPopup() {
+  if (_bulkTransitionPopup) {
+    _bulkTransitionPopup.remove();
+    _bulkTransitionPopup = null;
+  }
+  document.removeEventListener('click', _handleBulkTransitionOutside);
+}
+
+function _handleBulkTransitionOutside(e) {
+  if (_bulkTransitionPopup && !_bulkTransitionPopup.contains(e.target) &&
+      e.target.id !== 'btnBulkTransition') {
+    closeBulkTransitionPopup();
+  }
+}
+
+async function applyBulkTransition(transition, duration) {
+  if (!currentProjectId) return;
+  try {
+    const data = await apiFetch(`/api/projects/${currentProjectId}/bulk-transitions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transition, duration: parseInt(duration) || 500 }),
+    });
+    const label = transition ? _transitionLabel(transition) : 'ninguna';
+    showToast(`Transición "${label}" aplicada a ${data.updated} clips`, 'success');
+    closeBulkTransitionPopup();
+    await refreshEditing(currentProjectId);
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+  }
+}
+
+function _previewClip(projectId, chunk) {
+  const n = chunk.chunk_number;
+
+  // Use canvas player if available
+  if (_canvasPlayer) {
+    const idx = _editingChunks.findIndex(c => c.chunk_number === n);
+    if (idx >= 0) {
+      _canvasPlayer.play(idx);
+      _showPlayerControls();
+    }
+  }
+
+  // Highlight selected clip
+  document.querySelectorAll('.timeline-clip.selected').forEach(el => el.classList.remove('selected'));
+  const clips = document.querySelectorAll('.timeline-clip');
+  clips.forEach(el => {
+    if (parseInt(el.querySelector('.timeline-clip-num')?.textContent) === n) el.classList.add('selected');
+  });
+}
+
+// ── Canvas Player Integration ────────────────────────────────────────────
+
+function _initCanvasPlayer(projectId, chunks) {
+  const canvas = document.getElementById('editingCanvas');
+  if (!canvas) return;
+
+  // Stop previous player
+  if (_canvasPlayer) _canvasPlayer.stop();
+
+  _canvasPlayer = new CanvasPlayer(canvas, projectId, chunks);
+
+  // Wire up callbacks
+  _canvasPlayer.onStateChange = (state) => {
+    const btn = document.getElementById('playerPlayBtn');
+    if (!btn) return;
+    btn.innerHTML = state === 'playing' ? '&#9646;&#9646;' : '&#9654;';
+  };
+
+  _canvasPlayer.onTimeUpdate = (currentMs, totalMs) => {
+    const el = document.getElementById('playerTimeDisplay');
+    if (el) el.textContent = `${_fmtDuration(currentMs)} / ${_fmtDuration(totalMs)}`;
+  };
+
+  _canvasPlayer.onChunkChange = (idx) => {
+    // Highlight current clip in timeline
+    document.querySelectorAll('.timeline-clip.selected').forEach(el => el.classList.remove('selected'));
+    const clips = document.querySelectorAll('.timeline-clip');
+    clips.forEach(el => {
+      if (parseInt(el.dataset.idx) === idx) el.classList.add('selected');
+    });
+  };
+}
+
+function _showPlayerControls() {
+  const controls = document.getElementById('editingPlayerControls');
+  if (controls) controls.style.display = '';
+}
+
+function toggleCanvasPlay() {
+  if (_canvasPlayer) {
+    _canvasPlayer.togglePlayPause();
+    _showPlayerControls();
+  }
+}
+
+// ── Drag & Drop ──────────────────────────────────────────────────────────
+function _onDragStart(e) {
+  _dragSrcIdx = parseInt(e.currentTarget.dataset.idx);
+  e.currentTarget.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', _dragSrcIdx);
+}
+
+function _onDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  const target = e.currentTarget;
+  target.classList.remove('drag-over-left', 'drag-over-right');
+  const rect = target.getBoundingClientRect();
+  const midX = rect.left + rect.width / 2;
+  if (e.clientX < midX) target.classList.add('drag-over-left');
+  else target.classList.add('drag-over-right');
+}
+
+function _onDragLeave(e) {
+  e.currentTarget.classList.remove('drag-over-left', 'drag-over-right');
+}
+
+function _onDrop(e) {
+  e.preventDefault();
+  const target = e.currentTarget;
+  target.classList.remove('drag-over-left', 'drag-over-right');
+  const dstIdx = parseInt(target.dataset.idx);
+  if (_dragSrcIdx === null || _dragSrcIdx === dstIdx) return;
+
+  // Determine if inserting before or after
+  const rect = target.getBoundingClientRect();
+  const midX = rect.left + rect.width / 2;
+  let insertIdx = e.clientX < midX ? dstIdx : dstIdx + 1;
+  if (_dragSrcIdx < insertIdx) insertIdx--;
+
+  // Reorder array
+  const [moved] = _editingChunks.splice(_dragSrcIdx, 1);
+  _editingChunks.splice(insertIdx, 0, moved);
+
+  // Save new order to backend
+  _saveClipOrder();
+
+  // Rebuild timeline from reordered array
+  const projectId = currentProjectId;
+  apiFetch(`/api/projects/${projectId}`).then(p => {
+    _buildTimeline(p, _editingChunks);
+  });
+}
+
+function _onDragEnd(e) {
+  e.currentTarget.classList.remove('dragging');
+  document.querySelectorAll('.timeline-clip').forEach(el => {
+    el.classList.remove('drag-over-left', 'drag-over-right');
+  });
+  _dragSrcIdx = null;
+}
+
+async function _saveClipOrder() {
+  if (!currentProjectId) return;
+  const order = _editingChunks.map((c, i) => ({ chunk_id: c.id, new_number: i + 1 }));
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/reorder-chunks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order }),
+    });
+    showToast('Orden actualizado', 'success');
+  } catch (e) {
+    showToast('Error al reordenar: ' + e.message, 'error');
+  }
+}
+
+async function renderFinalVideo() {
+  if (!currentProjectId) return;
+  const btn = document.getElementById('editingRenderBtn');
+  const origText = btn ? btn.textContent : '🎬 Renderizar Video Final';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Iniciando render…'; }
+
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/render`, { method: 'POST' });
+    showToast('🎬 Renderizado iniciado con FFmpeg.', 'success');
+    await refreshEditing(currentProjectId);
+    startEditingLogStream(currentProjectId);
+  } catch (e) {
+    showToast('Error al renderizar: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = origText; }
+  }
+}
+
+async function cancelRender() {
+  if (!currentProjectId) return;
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/cancel-render`, { method: 'POST' });
+    showToast('Render cancelado. Puedes reiniciarlo.', 'success');
+    if (editingPollInterval) { clearInterval(editingPollInterval); editingPollInterval = null; }
+    await refreshEditing(currentProjectId);
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
   }
 }
 

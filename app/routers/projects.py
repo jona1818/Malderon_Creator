@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,7 @@ from ..models import Project, Chunk, ProjectStatus, AppSetting
 from ..schemas import ProjectCreate, ProjectOut, ProjectListItem, ScriptApprovalPayload, ResplitPayload, VoiceConfigPayload
 from ..config import PROJECTS_PATH, settings as app_settings
 from ..services.pipeline_service import start_pipeline, start_pipeline_phase2, start_regenerate_script, start_generate_voiceover, start_pipeline_phase3, start_create_scenes_from_srt, start_generate_images, start_retry_chunk_image, start_generate_motion_prompts, start_animate_scenes, start_regenerate_image_genaipro, start_regenerate_all_genaipro
+from ..services.render_service import start_render_final, render_transition_preview
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -583,6 +584,26 @@ def retry_chunk_image(project_id: int, chunk_number: int, db: Session = Depends(
 class MotionPromptUpdate(BaseModel):
     motion_prompt: str
 
+class ImagePromptUpdate(BaseModel):
+    image_prompt: str
+
+@router.put("/{project_id}/chunk/{chunk_number}/image-prompt", response_model=ProjectOut)
+def update_chunk_image_prompt(project_id: int, chunk_number: int, payload: ImagePromptUpdate, db: Session = Depends(get_db)):
+    """Manually update the image prompt for a specific chunk."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    chunk = db.query(Chunk).filter(Chunk.project_id == project_id, Chunk.chunk_number == chunk_number).first()
+    if not chunk:
+        raise HTTPException(status_code=404, detail=f"Chunk {chunk_number} no encontrado")
+
+    chunk.image_prompt = payload.image_prompt
+    chunk.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(project)
+    return project
+
 @router.put("/{project_id}/chunk/{chunk_number}/motion-prompt", response_model=ProjectOut)
 def update_chunk_motion_prompt(project_id: int, chunk_number: int, payload: MotionPromptUpdate, db: Session = Depends(get_db)):
     """Manually update the motion prompt for a specific chunk."""
@@ -654,6 +675,226 @@ def regenerate_all_images_genaipro(project_id: int, db: Session = Depends(get_db
 
     start_regenerate_all_genaipro(project_id)
     return project
+
+
+# ── Transitions ──────────────────────────────────────────────────────────
+
+VALID_TRANSITIONS = [
+    "fade", "fadeblack", "fadewhite", "dissolve",
+    "wipeleft", "wiperight", "wipeup", "wipedown",
+    "slideleft", "slideright", "slideup", "slidedown",
+    "circleopen", "circleclose", "radial",
+    "smoothleft", "smoothright", "smoothup", "smoothdown",
+    "zoomin",
+]
+
+
+@router.put("/{project_id}/chunk/{chunk_number}/transition")
+def set_chunk_transition(
+    project_id: int,
+    chunk_number: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """Set or clear the transition before a chunk."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    chunk = (
+        db.query(Chunk)
+        .filter(Chunk.project_id == project_id, Chunk.chunk_number == chunk_number)
+        .first()
+    )
+    if not chunk:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+
+    transition = payload.get("transition")  # None = remove transition
+    duration = payload.get("duration", 500)
+
+    if transition and transition not in VALID_TRANSITIONS:
+        raise HTTPException(status_code=400, detail=f"Transición inválida: {transition}")
+
+    chunk.transition = transition
+    chunk.transition_duration = max(200, min(int(duration), 2000))
+    chunk.updated_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True, "transition": chunk.transition, "duration": chunk.transition_duration}
+
+
+@router.get("/{project_id}/chunk/{chunk_number}/transition-preview")
+def get_transition_preview(
+    project_id: int,
+    chunk_number: int,
+    transition: str = Query(...),
+    duration: int = Query(500),
+    db: Session = Depends(get_db),
+):
+    """Generate a ~4s preview of the transition between chunk N-1 and chunk N."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if transition not in VALID_TRANSITIONS:
+        raise HTTPException(status_code=400, detail=f"Transición inválida: {transition}")
+
+    # Get chunk N (current) and chunk N-1 (previous)
+    chunk_b = db.query(Chunk).filter(
+        Chunk.project_id == project_id, Chunk.chunk_number == chunk_number
+    ).first()
+    if not chunk_b:
+        raise HTTPException(status_code=404, detail=f"Chunk {chunk_number} no encontrado")
+
+    # Find previous chunk
+    chunk_a = (
+        db.query(Chunk)
+        .filter(Chunk.project_id == project_id, Chunk.chunk_number < chunk_number)
+        .order_by(Chunk.chunk_number.desc())
+        .first()
+    )
+    if not chunk_a:
+        raise HTTPException(status_code=400, detail="No hay clip anterior para previsualizar")
+
+    # Check at least one has media
+    has_a = chunk_a.video_path or chunk_a.image_path
+    has_b = chunk_b.video_path or chunk_b.image_path
+    if not has_a and not has_b:
+        raise HTTPException(status_code=400, detail="Los clips no tienen media para previsualizar")
+
+    try:
+        result = render_transition_preview(chunk_a, chunk_b, transition, duration, project.slug)
+        return FileResponse(str(result), media_type="video/mp4", filename="transition_preview.mp4")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error generando preview: {str(exc)[:200]}")
+
+
+@router.post("/{project_id}/bulk-transitions")
+def set_bulk_transitions(
+    project_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """Apply or clear a transition on ALL chunks (except chunk 1)."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    transition = payload.get("transition")  # None = remove all
+    duration = payload.get("duration", 500)
+
+    if transition and transition not in VALID_TRANSITIONS:
+        raise HTTPException(status_code=400, detail=f"Transición inválida: {transition}")
+
+    chunks = (
+        db.query(Chunk)
+        .filter(Chunk.project_id == project_id)
+        .order_by(Chunk.chunk_number)
+        .all()
+    )
+    count = 0
+    for chunk in chunks:
+        if chunk.chunk_number == 1:
+            continue  # first chunk never has a transition before it
+        chunk.transition = transition
+        chunk.transition_duration = max(200, min(int(duration), 2000))
+        chunk.updated_at = datetime.utcnow()
+        count += 1
+
+    db.commit()
+    return {"ok": True, "transition": transition, "duration": duration, "updated": count}
+
+
+# ── Reorder Chunks ────────────────────────────────────────────────────────
+
+@router.post("/{project_id}/reorder-chunks")
+def reorder_chunks(project_id: int, payload: dict, db: Session = Depends(get_db)):
+    """Reorder chunk numbers based on drag-and-drop order."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    order = payload.get("order", [])
+    if not order:
+        raise HTTPException(status_code=400, detail="No order provided")
+    for item in order:
+        chunk = db.query(Chunk).filter(Chunk.id == item["chunk_id"]).first()
+        if chunk and chunk.project_id == project_id:
+            chunk.chunk_number = item["new_number"]
+    db.commit()
+    return {"ok": True}
+
+
+# ── Final Video Render ────────────────────────────────────────────────────
+
+@router.post("/{project_id}/render", response_model=ProjectOut)
+def render_final_video(project_id: int, db: Session = Depends(get_db)):
+    """Launch FFmpeg-based final video render (trim + concat + voiceover mix)."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.status not in (
+        ProjectStatus.images_ready, ProjectStatus.done, ProjectStatus.error,
+        ProjectStatus.rendering, ProjectStatus.queued,
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="El proyecto debe tener imágenes/videos generados para renderizar",
+        )
+    if not project.voiceover_path:
+        raise HTTPException(status_code=400, detail="No hay voiceover generado")
+
+    has_media = (
+        db.query(Chunk)
+        .filter(
+            Chunk.project_id == project_id,
+            (Chunk.video_path != None) | (Chunk.image_path != None),  # noqa: E711
+        )
+        .first()
+    )
+    if not has_media:
+        raise HTTPException(status_code=400, detail="Ninguna escena tiene video o imagen")
+
+    project.status = ProjectStatus.queued
+    project.error_message = None
+    project.final_video_path = None
+    project.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(project)
+
+    start_render_final(project.id)
+    return project
+
+
+@router.post("/{project_id}/cancel-render", response_model=ProjectOut)
+def cancel_render(project_id: int, db: Session = Depends(get_db)):
+    """Reset a stuck render back to done/images_ready so user can re-render."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.status not in (ProjectStatus.rendering, ProjectStatus.queued):
+        raise HTTPException(status_code=400, detail="El proyecto no está renderizando")
+    # Reset to done if there was a previous video, otherwise images_ready
+    new_status = ProjectStatus.done if project.final_video_path else ProjectStatus.images_ready
+    project.status = new_status
+    project.render_progress = 0
+    project.error_message = None
+    project.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@router.get("/{project_id}/final-video")
+def get_final_video(project_id: int, db: Session = Depends(get_db)):
+    """Serve the rendered final video for download."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not project.final_video_path:
+        raise HTTPException(status_code=404, detail="No hay video final renderizado")
+    path = Path(project.final_video_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Archivo de video no encontrado")
+    return FileResponse(str(path), media_type="video/mp4", filename=f"{project.slug}_final.mp4")
 
 
 # ── Reference Images (character + style) ──────────────────────────────────

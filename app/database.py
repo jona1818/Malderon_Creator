@@ -57,6 +57,17 @@ def init_db():
             except Exception:
                 pass  # column already exists
 
+        # Migrate: final video render + progress
+        for col_def in (
+            "ALTER TABLE projects ADD COLUMN final_video_path VARCHAR(512)",
+            "ALTER TABLE projects ADD COLUMN render_progress INTEGER DEFAULT 0",
+        ):
+            try:
+                conn.execute(__import__("sqlalchemy").text(col_def))
+                conn.commit()
+            except Exception:
+                pass
+
         # Migrate: reference images (character + style) for kontext model
         for col_def in (
             "ALTER TABLE projects ADD COLUMN reference_character_path VARCHAR(512)",
@@ -83,6 +94,8 @@ def init_db():
             "ALTER TABLE chunks ADD COLUMN motion_prompt TEXT",
             "ALTER TABLE chunks ADD COLUMN start_ms INTEGER",
             "ALTER TABLE chunks ADD COLUMN end_ms INTEGER",
+            "ALTER TABLE chunks ADD COLUMN transition VARCHAR(50)",
+            "ALTER TABLE chunks ADD COLUMN transition_duration INTEGER DEFAULT 500",
         ):
             try:
                 conn.execute(__import__("sqlalchemy").text(col_def))

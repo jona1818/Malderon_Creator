@@ -52,12 +52,18 @@ skills-lock.json
 
 # Auth / Sessions
 meta_session/
+meta_session_*/
 *.session
+
+# Large generated files (exceed GitHub 100MB limit)
+**/final/final_video.mp4
+**/final/*.mp4
 
 # Temp/Error files
 nul
 *.tmp
 temp/
+test_screenshots/
 
 # IDE
 *.code-workspace

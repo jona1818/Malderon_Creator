@@ -5,7 +5,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>YouTube Video Creator</title>
-  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="stylesheet" href="/static/css/style.css?v=20260309j" />
 </head>
 
 <body>
@@ -204,6 +204,8 @@
           <span id="detailBadge" class="badge"></span>
         </div>
 
+        <div class="detail-layout">
+        <div class="detail-main">
         <!-- Progress card (visible durante queued / processing / error) -->
         <div class="progress-card" id="progressCard" style="display:none">
           <div class="progress-header">
@@ -379,13 +381,6 @@
         </div>
 
         <!-- 4. Escenas (visible cuando el audio está generado) -->
-        <div class="chunks-section" id="chunksSection" style="display:none">
-          <div class="chunks-section-header">
-            <h2>Escenas <span id="chunksCount" class="chunks-count"></span></h2>
-          </div>
-          <div id="chunksList" class="chunks-list"></div>
-        </div>
-
         <!-- 4b. Imágenes panel — visible en estados scenes_ready / generating_images / images_ready -->
         <div class="scenes-ready-section card" id="scenesReadySection" style="display:none">
           <!-- Reference Images Section (Character + Style) -->
@@ -452,10 +447,53 @@
               <h3>🎬 Animar Escenas</h3>
               <span id="animationProgress" style="font-size:13px; color:var(--text-secondary);"></span>
             </div>
-            <p class="scenes-ready-hint">Anima cada imagen con WaveSpeed (wan-2.2 i2v). Máximo 2 animaciones simultáneas (~2 min c/u).</p>
+            <p class="scenes-ready-hint">Anima cada imagen con Meta AI (Playwright). Se abre el navegador por cada escena y descarga el video generado.</p>
             <button class="btn btn-primary btn-lg" id="startVeo3AnimationBtn" onclick="startVeo3Animation()">
-              🎬 Animar con WaveSpeed
+              🤖 Animar con Meta AI
             </button>
+          </div>
+
+        </div>
+
+        <div class="chunks-section" id="chunksSection" style="display:none">
+          <div class="chunks-section-header">
+            <h2>Escenas <span id="chunksCount" class="chunks-count"></span></h2>
+          </div>
+          <div class="scenes-table">
+            <div class="scenes-table-header">
+              <div class="st-col st-num">#</div>
+              <div class="st-col st-img">Imagen</div>
+              <div class="st-col st-text">Guion</div>
+              <div class="st-col st-vid">Video</div>
+              <div class="st-col st-time">Tiempo</div>
+              <div class="st-col st-status">Estado</div>
+              <div class="st-col st-actions"></div>
+            </div>
+            <div id="chunksList" class="scenes-table-body"></div>
+          </div>
+        </div>
+
+        <!-- ── Go to Editing (after scenes table) ──────────────────── -->
+        <div id="goToEditingSection"
+          style="margin-top:20px; margin-bottom:20px; display:none">
+          <button class="btn btn-primary btn-lg" id="goToEditingBtn" onclick="showView('editing', currentProjectId)" style="width:100%; padding:16px; font-size:16px;">
+            🎬 Ir a Edición — Renderizar Video Final
+          </button>
+        </div>
+
+        <!-- Video Preview Modal -->
+        <div id="videoPreviewModal" class="video-modal" style="display:none" onclick="closeVideoModal(event)">
+          <div class="video-modal-content media-modal-content" onclick="event.stopPropagation()">
+            <button class="video-modal-close" onclick="closeVideoModal()">&times;</button>
+            <video id="videoPreviewPlayer" controls autoplay style="width:100%;border-radius:8px;"></video>
+            <div class="modal-prompt-section">
+              <label class="modal-prompt-label" id="videoModalLabel">Prompt de animación</label>
+              <textarea id="videoModalPrompt" class="modal-prompt-textarea" rows="3"></textarea>
+              <div class="modal-prompt-actions">
+                <button class="btn btn-ghost btn-sm" onclick="saveMotionPromptFromModal()">💾 Guardar prompt</button>
+                <button class="btn btn-primary btn-sm" onclick="saveAndRegenerateVideo()">🔄 Regenerar video</button>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -464,17 +502,112 @@
           <video id="videoPreview" controls autoplay class="video-preview"></video>
         </div>
 
-        <!-- Logs -->
-        <div class="logs-section">
-          <div class="logs-header">
-            <h2>Logs en tiempo real</h2>
-            <button class="btn btn-ghost btn-sm" onclick="clearLogs()">Limpiar</button>
+        </div><!-- /detail-main -->
+
+        <!-- Logs sidebar -->
+        <div class="detail-logs" id="detailLogs">
+          <button class="logs-toggle" onclick="toggleLogs()" title="Mostrar/ocultar logs">&#9776;</button>
+          <div class="logs-section">
+            <div class="logs-header">
+              <h2>Logs</h2>
+              <button class="btn btn-ghost btn-sm" onclick="clearLogs()">Limpiar</button>
+            </div>
+            <div id="logsContainer" class="logs-container">
+              <div class="log-placeholder">Esperando logs…</div>
+            </div>
           </div>
-          <div id="logsContainer" class="logs-container">
-            <div class="log-placeholder">Esperando logs…</div>
+        </div>
+        </div><!-- /detail-layout -->
+
+      </section>
+
+      <!-- ── Editing view ────────────────────────────────────────────── -->
+      <section class="view" id="view-editing">
+        <div class="editing-header">
+          <button class="btn-back" onclick="showView('detail', currentProjectId)">← Volver al Proyecto</button>
+          <h1 id="editingTitle">Edición</h1>
+          <span id="editingBadge" class="badge"></span>
+        </div>
+
+        <!-- Main editor area: preview + controls side by side -->
+        <div class="editing-main">
+          <!-- Left: Preview -->
+          <div class="editing-preview-area">
+            <div class="editing-preview-screen" id="editingPreviewScreen">
+              <div class="editing-preview-placeholder" id="editingPreviewPlaceholder">
+                <span>Vista Previa</span>
+              </div>
+              <video id="editingPreviewPlayer" style="display:none; width:100%; height:100%; object-fit:contain;" controls></video>
+              <canvas id="editingCanvas" style="display:none; width:100%; height:100%;"></canvas>
+              <!-- Player controls overlay -->
+              <div id="editingPlayerControls" class="player-controls" style="display:none">
+                <button id="playerPlayBtn" class="player-btn" onclick="toggleCanvasPlay()">&#9654;</button>
+                <span id="playerTimeDisplay" class="player-time">0:00 / 0:00</span>
+              </div>
+            </div>
+            <!-- Render button below preview -->
+            <div class="editing-render-bar">
+              <button class="btn btn-primary" id="editingRenderBtn" onclick="renderFinalVideo()" style="flex:1;">
+                🎬 Renderizar Video Final
+              </button>
+              <span id="editingRenderHint" class="text-secondary" style="font-size:12px; margin-left:12px;">Listo</span>
+            </div>
+            <!-- Render progress bar -->
+            <div id="editingRenderProgress" class="render-progress-container" style="display:none">
+              <div class="render-progress-info">
+                <span id="editingProgressStage">Preparando clips…</span>
+                <span id="editingProgressPct">0%</span>
+              </div>
+              <div class="render-progress-bar">
+                <div class="render-progress-fill" id="editingProgressFill" style="width:0%"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right: Final Video + Logs -->
+          <div class="editing-sidebar">
+            <!-- Final Video -->
+            <div id="editingFinalPreview" class="editing-final-card" style="display:none">
+              <h4>Video Final</h4>
+              <video id="editingVideoPlayer" controls class="editing-video-player"></video>
+              <div class="editing-preview-actions">
+                <a id="editingVideoDownload" class="btn btn-primary btn-sm" download="final_video.mp4">⬇️ Descargar</a>
+                <button class="btn btn-secondary btn-sm" onclick="renderFinalVideo()">🔄 Re-renderizar</button>
+              </div>
+            </div>
+            <!-- Logs (hidden until rendering) -->
+            <div class="editing-logs-card" id="editingLogsCard" style="display:none">
+              <h4>Logs <button class="btn btn-ghost btn-sm" onclick="document.getElementById('editingLogsCard').style.display='none'" style="float:right;font-size:10px;">✕</button></h4>
+              <div id="editingLogsContainer" class="logs-container" style="max-height:300px;"></div>
+            </div>
           </div>
         </div>
 
+        <!-- Timeline Editor -->
+        <div class="editing-timeline-section">
+          <!-- Toolbar -->
+          <div class="timeline-toolbar">
+            <span class="timeline-toolbar-label">🎬 TIMELINE</span>
+            <span id="editingClipCount" class="text-secondary" style="font-size:11px;"></span>
+            <div style="flex:1;"></div>
+            <button class="btn btn-sm btn-outline" id="btnBulkTransition" onclick="openBulkTransitionPopup()" title="Aplicar transición a todos los clips">🔀 Transiciones</button>
+            <span class="timeline-hint" id="timelineDragHint">Arrastra los clips para reordenar</span>
+          </div>
+          <!-- Video track -->
+          <div class="timeline-track">
+            <div class="timeline-track-label">🎥 Video</div>
+            <div class="timeline-track-clips" id="editingTimeline"></div>
+          </div>
+          <!-- Audio track -->
+          <div class="timeline-track timeline-track-audio">
+            <div class="timeline-track-label">🎤 Audio</div>
+            <div class="timeline-track-audio-bar" id="editingAudioTrack">
+              <div class="audio-bar-fill">Voiceover</div>
+            </div>
+          </div>
+          <!-- Time ruler -->
+          <div class="timeline-ruler" id="editingTimeRuler"></div>
+        </div>
       </section>
 
       <!-- ── Settings view ──────────────────────────────────────────── -->
@@ -853,7 +986,8 @@
     </div>
   </div>
 
-  <script src="/static/js/app.js?v=20260306d"></script>
+  <script src="/static/js/canvas-player.js?v=20260309j"></script>
+  <script src="/static/js/app.js?v=20260309j"></script>
 </body>
 
 </html>
