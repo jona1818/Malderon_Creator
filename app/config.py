@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     pexels_api_key: str = ""
     pixabay_api_key: str = ""
+    nasa_api_key: str = ""
     nca_toolkit_url: str = "http://localhost:8090"
     nca_api_key: str = ""
     google_api_key: str = ""
@@ -15,6 +16,7 @@ class Settings(BaseSettings):
     pollinations_api_key: str = ""  # Free image generation via Pollinations.ai
     wavespeed_api_key: str = ""    # WaveSpeed.ai images + animation
     image_provider: str = "pollinations"  # "pollinations" or "wavespeed"
+    clip_bank_url: str = ""  # URL of clip bank server (e.g. http://192.168.1.X:8500)
     max_workers: int = 3
     projects_dir: str = "./projects"
     database_url: str = "sqlite:///./videocreator.db"

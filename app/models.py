@@ -70,6 +70,7 @@ class Project(Base):
     error_message = Column(Text, nullable=True)
     final_video_path = Column(String(512), nullable=True)
     render_progress = Column(Integer, default=0)            # 0-100 render %
+    collection = Column(String(100), nullable=True, default="general")  # stock footage collection
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -89,6 +90,9 @@ class Chunk(Base):
     video_prompt = Column(Text, nullable=True)
     motion_prompt = Column(Text, nullable=True)
     search_keywords = Column(String(512), nullable=True)
+    asset_type = Column(String(50), nullable=True)        # stock_video | archive_footage | space_media | ai_image
+    asset_source = Column(String(50), nullable=True)      # pexels | pixabay | nasa | internet_archive | nara | pollinations
+    overlay_text = Column(String(512), nullable=True)     # text overlay for title scenes
     audio_path = Column(String(512), nullable=True)
     image_path = Column(String(512), nullable=True)
     video_path = Column(String(512), nullable=True)

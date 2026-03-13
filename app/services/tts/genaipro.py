@@ -25,12 +25,22 @@ Supported config keys:
 """
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 
 import requests
 
 from .base import TTSProvider
+
+
+def _safe_print(msg: str) -> None:
+    """Print that won't crash on Windows when stdout is invalid/piped."""
+    try:
+        sys.stdout.buffer.write((msg + "\n").encode("utf-8", errors="replace"))
+        sys.stdout.buffer.flush()
+    except Exception:
+        pass
 
 BASE_URL = "https://genaipro.vn/api/v1"
 
@@ -94,7 +104,7 @@ class GenAIProTTS(TTSProvider):
         if cached:
             voices, ts = cached
             if time.time() - ts < _VOICE_CACHE_TTL:
-                print(f"[GenAIPro] list_voices: cache hit ({len(voices)} voices)")
+                _safe_print(f"[GenAIPro] list_voices: cache hit ({len(voices)} voices)")
                 return voices
 
         headers = {"Authorization": f"Bearer {api_key}"}
@@ -133,7 +143,7 @@ class GenAIProTTS(TTSProvider):
                 break
 
             all_voices.extend(batch)
-            print(f"[GenAIPro] list_voices page={next_page!r}: got {len(batch)} voices (total: {len(all_voices)})")
+            _safe_print(f"[GenAIPro] list_voices page={next_page!r}: got {len(batch)} voices (total: {len(all_voices)})")
 
             if isinstance(data, list):
                 if len(batch) < page_size:
@@ -163,7 +173,7 @@ class GenAIProTTS(TTSProvider):
             seen.add(vid)
             unique.append(v)
 
-        print(f"[GenAIPro] list_voices: returning {len(unique)} unique voices")
+        _safe_print(f"[GenAIPro] list_voices: returning {len(unique)} unique voices")
         _VOICE_CACHE[cache_key] = (unique, time.time())
         return unique
 
@@ -191,19 +201,19 @@ class GenAIProTTS(TTSProvider):
             style, speed, similarity, stability, use_speaker_boost,
             language_code,
         )
-        print(f"[GenAIPro] task_id={task_id}")
+        _safe_print(f"[GenAIPro] task_id={task_id}")
 
         # 2. Poll until completed
         result_url, subtitle_url, raw_response = self._poll_task(task_id)
-        print(f"[GenAIPro] completed. result={result_url!r} subtitle={subtitle_url!r}")
-        print(f"[GenAIPro] full response keys: {list(raw_response.keys())}")
+        _safe_print(f"[GenAIPro] completed. result={result_url!r} subtitle={subtitle_url!r}")
+        _safe_print(f"[GenAIPro] full response keys: {list(raw_response.keys())}")
 
         # 3. Download MP3
         output_path.parent.mkdir(parents=True, exist_ok=True)
         mp3_resp = requests.get(result_url, timeout=120)
         mp3_resp.raise_for_status()
         output_path.write_bytes(mp3_resp.content)
-        print(f"[GenAIPro] MP3 guardado: {output_path} ({len(mp3_resp.content)} bytes)")
+        _safe_print(f"[GenAIPro] MP3 guardado: {output_path} ({len(mp3_resp.content)} bytes)")
 
         # 4. Download SRT — try every field name the API may use
         subtitle_url = (
@@ -219,12 +229,12 @@ class GenAIProTTS(TTSProvider):
                 srt_resp = requests.get(subtitle_url, timeout=60)
                 srt_resp.raise_for_status()
                 srt_path.write_bytes(srt_resp.content)
-                print(f"[GenAIPro] SRT descargado: {srt_path} ({len(srt_resp.content)} bytes)")
+                _safe_print(f"[GenAIPro] SRT descargado: {srt_path} ({len(srt_resp.content)} bytes)")
             except Exception as e:
                 # SRT download failure does NOT fail the TTS — audio is what matters
-                print(f"[GenAIPro] AVISO: error descargando SRT desde {subtitle_url}: {e}")
+                _safe_print(f"[GenAIPro] AVISO: error descargando SRT desde {subtitle_url}: {e}")
         else:
-            print(
+            _safe_print(
                 f"[GenAIPro] AVISO: esta voz no retorna subtitulos (subtitle=null). "
                 f"Se usara fallback (mutagen + texto del script) al crear escenas."
             )
@@ -299,7 +309,7 @@ class GenAIProTTS(TTSProvider):
             r.raise_for_status()
             data   = r.json()
             status = data.get("status", "").lower()
-            print(f"[GenAIPro] poll status={status!r} keys={list(data.keys())}")
+            _safe_print(f"[GenAIPro] poll status={status!r} keys={list(data.keys())}")
 
             if status == "completed":
                 result_url   = data.get("result", "")

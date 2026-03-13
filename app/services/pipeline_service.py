@@ -35,6 +35,7 @@ from .claude_service import (
 )
 from .openai_service import generate_tts
 from . import pexels_service, pixabay_service, nca_service, google_service, wavespeed_service
+from . import visual_analyzer_service, stock_search_service
 from .image import generate_image as _dispatch_generate_image
 from .video import motion_service, pollinations_video_service
 
@@ -491,7 +492,7 @@ def _find_srt_for_project(slug: str) -> tuple:
         if entries:
             return global_srt, entries
 
-    # 2. Per-chunk SRTs — concatenate them in order
+    # 2. Per-chunk SRTs — concatenate them in order, building a proper combined SRT
     import glob as _glob
     chunk_srts = sorted(
         _glob.glob(str(vo / "audio-chunk-*.srt")),
@@ -500,15 +501,28 @@ def _find_srt_for_project(slug: str) -> tuple:
     )
     if chunk_srts:
         all_entries: list = []
+        combined_srt_lines: list = []
+        global_idx = 1
         offset = 0.0
         for srt_file in chunk_srts:
             chunk_entries = _parse_srt_entries(Path(srt_file))
             for start, end, text in chunk_entries:
-                all_entries.append((start + offset, end + offset, text))
+                abs_start = start + offset
+                abs_end = end + offset
+                all_entries.append((abs_start, abs_end, text))
+                combined_srt_lines.append(str(global_idx))
+                combined_srt_lines.append(f"{_fmt_srt_time(abs_start)} --> {_fmt_srt_time(abs_end)}")
+                combined_srt_lines.append(text)
+                combined_srt_lines.append("")
+                global_idx += 1
             if chunk_entries:
                 offset = max(end for _, end, _ in chunk_entries) + offset
         if all_entries:
-            return Path(chunk_srts[0]), all_entries
+            combined_srt_content = "\n".join(combined_srt_lines)
+            # Write combined SRT to disk for reuse and return its path
+            combined_path = vo / "subtitles-combined.srt"
+            combined_path.write_text(combined_srt_content, encoding="utf-8")
+            return combined_path, all_entries
 
     return None, []
 
@@ -530,6 +544,103 @@ def _synthetic_entries_from_audio(slug: str, db, project_id: int) -> tuple:
         duration = max(words / 2.5, 5.0)
 
     return max(duration, 1.0), []
+
+
+def _remap_scene_text_from_script(scenes: list, original_script: str) -> list:
+    """Replace SRT-derived scene text with properly segmented text from the original script.
+
+    GenAIPro cuts SRT entries every ~3.8s regardless of sentence boundaries, so the
+    scene text from SRT grouping is often truncated mid-word/sentence.
+
+    Strategy: use proportional character positions in the original script, then snap
+    each scene boundary to the nearest clause boundary (period, comma-clause, etc.).
+    This ensures every scene has clean text with no duplicates.
+    """
+    import re as _re
+
+    if not original_script or not scenes:
+        return scenes
+
+    script = original_script.strip()
+    if not script:
+        return scenes
+
+    # Find all valid cut points in the script:
+    # Priority 1: sentence endings (. ! ?)
+    # Priority 2: clause-separating commas (followed by space + lowercase or connector)
+    cut_points = []
+    # Sentence endings
+    for m in _re.finditer(r'[.!?](?:\s|$)', script):
+        cut_points.append(m.end())
+    # Clause commas — only commas followed by a space (natural pause points)
+    for m in _re.finditer(r',\s', script):
+        cut_points.append(m.end())
+
+    cut_points = sorted(set(cut_points))
+    if not cut_points:
+        return scenes
+
+    # Calculate proportional character position for each scene boundary
+    scene_srt_words = [len(s["texto"].split()) for s in scenes]
+    total_srt_words = sum(scene_srt_words)
+    if total_srt_words == 0:
+        return scenes
+
+    script_len = len(script)
+
+    # Build cumulative word fractions → target character cut points
+    cumulative_words = 0
+    target_positions = []
+    for wc in scene_srt_words:
+        cumulative_words += wc
+        fraction = cumulative_words / total_srt_words
+        target_positions.append(int(fraction * script_len))
+
+    # Snap each target position to the nearest cut point, ensuring no duplicates
+    # and strictly increasing positions
+    snapped_cuts = []
+    used_min = 0  # minimum allowed position (must be > previous cut)
+
+    for i, raw_pos in enumerate(target_positions):
+        is_last = (i == len(target_positions) - 1)
+        if is_last:
+            # Last scene always gets the rest of the script
+            snapped_cuts.append(script_len)
+            continue
+
+        # Find the closest cut point to raw_pos that is > used_min
+        best = None
+        best_dist = float('inf')
+        for cp in cut_points:
+            if cp <= used_min:
+                continue
+            dist = abs(cp - raw_pos)
+            if dist < best_dist:
+                best = cp
+                best_dist = dist
+            elif cp > raw_pos + 200:
+                # Don't look too far past the target
+                break
+
+        if best is None:
+            best = script_len
+
+        snapped_cuts.append(best)
+        used_min = best
+
+    # Build scene texts — strictly non-overlapping slices
+    prev_pos = 0
+    for i, s in enumerate(scenes):
+        end_pos = snapped_cuts[i] if i < len(snapped_cuts) else script_len
+        # Safety: end must be > prev to avoid empty/duplicate text
+        if end_pos <= prev_pos:
+            end_pos = min(prev_pos + 1, script_len)
+        text = script[prev_pos:end_pos].strip()
+        if text:
+            s["texto"] = text
+        prev_pos = end_pos
+
+    return scenes
 
 
 def _run_create_scenes_from_srt(project_id: int) -> None:
@@ -561,18 +672,21 @@ def _run_create_scenes_from_srt(project_id: int) -> None:
                 "No se encontro archivo SRT. El proveedor TTS debe generar subtitulos."
             )
 
+        # srt_file is always a valid path (global subtitles.srt or combined per-chunk SRT)
         srt_content = Path(srt_file).read_text(encoding="utf-8", errors="replace")
         total_duration = max(end for _, end, _ in srt_entries)
         _log(db, project_id,
              f"SRT encontrado: {Path(srt_file).name} ({len(srt_entries)} entradas, {total_duration:.1f}s).",
              stage="srt_scenes")
 
-        # ── Call Claude to divide script into scenes using real SRT timestamps
+        # ── Call Claude Haiku to divide script into scenes
+        project_mode = project.mode.value if project.mode else "animated"
+        print(f"[SceneDivision] USANDO divide_script_into_scenes con Haiku — modo={project_mode}, proyecto='{project.title}'")
         _log(db, project_id,
-             "Enviando script + SRT a Claude para division de escenas...",
+             f"[SceneDivision] Haiku divide_script_into_scenes — modo={project_mode}",
              stage="srt_scenes")
 
-        scenes = divide_script_into_scenes(script_text, srt_content)
+        scenes = divide_script_into_scenes(script_text, srt_content, mode=project_mode)
 
         _log(db, project_id,
              f"Claude dividio el script en {len(scenes)} escenas.",
@@ -658,6 +772,173 @@ def _run_create_scenes_from_srt(project_id: int) -> None:
 def start_create_scenes_from_srt(project_id: int) -> None:
     """Align scene chunks to SRT and slice audio. Runs in background thread."""
     t = threading.Thread(target=_run_create_scenes_from_srt, args=(project_id,), daemon=True)
+    t.start()
+
+
+# ── Stock footage asset search ────────────────────────────────────────────────
+
+def _run_stock_asset_search(project_id: int) -> None:
+    """Analyze scenes visually and search/download stock assets for each."""
+    db = SessionLocal()
+    try:
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if not project:
+            return
+
+        _update_project(db, project, status=ProjectStatus.generating_images)
+        _log(db, project_id, "🔍 Iniciando búsqueda de assets de stock…", stage="stock_search")
+
+        chunks = (
+            db.query(Chunk)
+            .filter(Chunk.project_id == project_id)
+            .order_by(Chunk.chunk_number)
+            .all()
+        )
+        if not chunks:
+            _log(db, project_id, "No hay escenas para buscar assets.", stage="stock_search")
+            _update_project(db, project, status=ProjectStatus.images_ready)
+            return
+
+        # Step 1: Visual analysis with Claude Haiku
+        _log(db, project_id,
+             f"🧠 Analizando {len(chunks)} escenas con Claude Haiku…",
+             stage="stock_search")
+
+        scenes_for_analysis = [
+            {"id": c.chunk_number, "texto": c.scene_text or ""}
+            for c in chunks
+        ]
+        full_script = project.script_final or project.script or ""
+
+        analyses = visual_analyzer_service.analyze_scenes(full_script, scenes_for_analysis)
+
+        # Build lookup by scene_id
+        analysis_map = {a["scene_id"]: a for a in analyses}
+
+        _log(db, project_id,
+             f"✅ Análisis visual completado: {len(analyses)} escenas analizadas.",
+             stage="stock_search")
+
+        # Step 2: Search and download assets for each scene
+        project_dir = PROJECTS_PATH / project.slug
+        total = len(chunks)
+        found_count = 0
+
+        for idx, chunk in enumerate(chunks, 1):
+            analysis = analysis_map.get(chunk.chunk_number, {})
+            if not analysis:
+                _log(db, project_id,
+                     f"⚠️ Escena {chunk.chunk_number}: sin análisis, usando fallback AI.",
+                     stage="stock_search", level="warning")
+                analysis = {"asset_type": "stock_video", "search_query": "nature landscape",
+                            "search_query_alt": "aerial view"}
+
+            _log(db, project_id,
+                 f"🔎 [{idx}/{total}] Escena {chunk.chunk_number}: "
+                 f"tipo={analysis.get('asset_type')}, query='{analysis.get('search_query')}'",
+                 stage="stock_search")
+
+            result = stock_search_service.find_asset_for_scene(
+                scene_id=chunk.chunk_number,
+                analysis=analysis,
+                project_dir=project_dir,
+                collection=project.collection or "general",
+            )
+
+            # Update chunk in DB
+            update_kwargs = {
+                "asset_type": result.get("asset_type_found"),
+                "asset_source": result.get("asset_source"),
+            }
+            if result.get("overlay_text"):
+                update_kwargs["overlay_text"] = result["overlay_text"]
+
+            local_path = result.get("local_path")
+            if local_path:
+                if local_path.endswith(".mp4"):
+                    update_kwargs["video_path"] = local_path
+                else:
+                    update_kwargs["image_path"] = local_path
+                found_count += 1
+
+            _update_chunk(db, chunk, **update_kwargs)
+
+            source = result.get("asset_source", "?")
+            atype = result.get("asset_type_found", "none")
+            _log(db, project_id,
+                 f"{'✅' if local_path else '⚠️'} [{idx}/{total}] Escena {chunk.chunk_number}: "
+                 f"{atype} from {source}" + (f" → {Path(local_path).name}" if local_path else " → AI fallback"),
+                 stage="stock_search")
+
+        # Step 3: Generate AI images for scenes that need them
+        ai_chunks = [c for c in chunks if not c.video_path and not c.image_path]
+        # Refresh from DB since we updated them
+        ai_chunks = (
+            db.query(Chunk)
+            .filter(
+                Chunk.project_id == project_id,
+                Chunk.video_path.is_(None),
+                Chunk.image_path.is_(None),
+            )
+            .order_by(Chunk.chunk_number)
+            .all()
+        )
+
+        if ai_chunks:
+            _log(db, project_id,
+                 f"🎨 Generando {len(ai_chunks)} imágenes AI con Pollinations (fallback)…",
+                 stage="stock_search")
+            poll_key = _get_pollinations_api_key(db)
+            for chunk in ai_chunks:
+                try:
+                    analysis = analysis_map.get(chunk.chunk_number, {})
+                    prompt = analysis.get("search_query", chunk.scene_text or "abstract background")
+                    img_path = project_dir / "assets" / f"scene_{chunk.chunk_number}.jpg"
+                    img_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    _dispatch_generate_image(
+                        prompt, img_path,
+                        provider="pollinations", api_key=poll_key,
+                    )
+
+                    if img_path.exists() and img_path.stat().st_size > 1000:
+                        _update_chunk(db, chunk, image_path=str(img_path), asset_source="pollinations")
+                        _log(db, project_id,
+                             f"✅ Escena {chunk.chunk_number}: AI image generada.",
+                             stage="stock_search")
+                    else:
+                        _log(db, project_id,
+                             f"⚠️ Escena {chunk.chunk_number}: AI image falló.",
+                             stage="stock_search", level="warning")
+                except Exception as exc:
+                    _log(db, project_id,
+                         f"⚠️ Escena {chunk.chunk_number}: AI image error: {exc}",
+                         stage="stock_search", level="warning")
+
+        _update_project(db, project, status=ProjectStatus.images_ready)
+        _log(db, project_id,
+             f"🎉 Búsqueda de assets completada: {found_count}/{total} encontrados en stock.",
+             stage="stock_search")
+
+    except Exception as exc:
+        db.rollback()
+        try:
+            project = db.query(Project).filter(Project.id == project_id).first()
+            if project:
+                _update_project(db, project, status=ProjectStatus.error,
+                                error_message=str(exc))
+            _log(db, project_id,
+                 f"Error en búsqueda de assets: {exc}\n{traceback.format_exc()}",
+                 stage="stock_search", level="error")
+        except Exception:
+            print(f"[CRITICAL] Failed to log stock search error for project {project_id}")
+    finally:
+        db.close()
+
+
+def start_stock_asset_search(project_id: int) -> None:
+    """Search and download stock assets for all scenes. Runs in background thread."""
+    t = threading.Thread(target=_run_stock_asset_search, args=(project_id,), daemon=True)
     t.start()
 
 
@@ -812,6 +1093,7 @@ def _run_generate_images(project_id: int) -> None:
                 prompt_map = google_service.batch_generate_image_prompts(
                     scenes_data,
                     reference_character=project.reference_character or "",
+                    full_script=project.script_final or "",
                 )
                 for c in chunks_needing_prompt:
                     if c.chunk_number in prompt_map:
@@ -1776,7 +2058,6 @@ def _animate_one_scene(project_id: int, chunk_number: int, slug: str, api_key: s
 
 def _run_animate_scenes(project_id: int) -> None:
     """Animate all scenes using Meta AI with 5 parallel browser workers."""
-    import asyncio as _asyncio
     from .video import meta_bot as _meta_bot
 
     NUM_WORKERS = 5
@@ -1840,10 +2121,10 @@ def _run_animate_scenes(project_id: int) -> None:
             finally:
                 sdb.close()
 
-        # Run all tasks with parallel browsers
-        results = _asyncio.run(_meta_bot.animate_batch(
+        # Run all tasks with parallel browsers (sync, uses threads internally)
+        results = _meta_bot.animate_batch(
             tasks, num_workers=NUM_WORKERS, on_scene_done=_on_scene_done
-        ))
+        )
 
         done_count = sum(1 for _, e in results if e is None)
         errors = [f"Escena #{cn}: {e}" for cn, e in results if e is not None]

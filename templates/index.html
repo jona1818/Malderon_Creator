@@ -5,7 +5,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>YouTube Video Creator</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=20260309j" />
+  <link rel="stylesheet" href="/static/css/style.css?v=20260310g" />
 </head>
 
 <body>
@@ -174,6 +174,37 @@
               </div>
             </div>
 
+            <!-- ── Colección (solo modo Stock Footage) ── -->
+            <div class="form-group" id="collectionGroup" style="display:none;">
+              <label>📁 Colección / Canal</label>
+              <div class="cb-wrap" id="collectionCombo">
+                <!-- trigger -->
+                <div class="cb-trigger" id="cbTrigger" onclick="toggleCombo()">
+                  <span class="cb-dot"></span>
+                  <span class="cb-value" id="cbValue">📦 general</span>
+                  <svg class="cb-arrow" id="cbArrow" viewBox="0 0 12 12" width="12" height="12"><path fill="currentColor" d="M6 8L1 3h10z"/></svg>
+                </div>
+                <!-- dropdown -->
+                <div class="cb-dropdown" id="cbDropdown" style="display:none;">
+                  <div class="cb-search-wrap">
+                    <svg viewBox="0 0 16 16" width="14" height="14" fill="none"><circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" stroke-width="1.5"/><path d="M10 10l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                    <input class="cb-search" id="cbSearch" type="text" placeholder="Buscar o crear…"
+                      oninput="filterCombo(this.value)"
+                      onkeydown="cbKeydown(event)" autocomplete="off" />
+                  </div>
+                  <ul class="cb-list" id="cbList"><!-- populated by JS --></ul>
+                </div>
+              </div>
+              <!-- nueva colección -->
+              <div id="newCollectionInput" style="display:none; margin-top:8px;">
+                <input type="text" id="collectionName"
+                  placeholder="Ej: cine, japon, construcciones_usa"
+                  oninput="this.value=this.value.toLowerCase().replace(/[^a-z0-9_]/g,'_')"
+                  style="width:100%; box-sizing:border-box;" />
+                <small style="color:var(--text-muted); font-size:11px;">Solo letras minúsculas, números y guión bajo.</small>
+              </div>
+            </div>
+
             <div class="form-group" id="characterGroup">
               <label>Personaje / Estilo de referencia <span class="optional">(opcional, solo modo
                   Animado)</span></label>
@@ -202,6 +233,7 @@
           </button>
           <h1 id="detailTitle">—</h1>
           <span id="detailBadge" class="badge"></span>
+          <span id="detailCollectionBadge" style="display:none; font-size:12px; color:var(--muted); margin-left:6px;"></span>
         </div>
 
         <div class="detail-layout">
@@ -380,81 +412,7 @@
           </div>
         </div>
 
-        <!-- 4. Escenas (visible cuando el audio está generado) -->
-        <!-- 4b. Imágenes panel — visible en estados scenes_ready / generating_images / images_ready -->
-        <div class="scenes-ready-section card" id="scenesReadySection" style="display:none">
-          <!-- Reference Images Section (Character + Style) -->
-          <div id="referenceImagesSection" style="margin-bottom:16px; padding:12px; background:var(--bg-secondary); border-radius:8px;">
-            <div style="margin-bottom:8px;">
-              <strong>Referencias para Kontext</strong>
-              <span style="font-size:12px; color:var(--text-secondary); margin-left:6px;">(opcionales — activan modelo kontext)</span>
-            </div>
-            <div style="display:flex; gap:16px; flex-wrap:wrap;">
-              <!-- Character Reference -->
-              <div style="flex:1; min-width:180px;">
-                <div style="display:flex; align-items:center; gap:6px; margin-bottom:6px;">
-                  <span style="font-size:13px; font-weight:600;">Personaje</span>
-                  <span id="refCharStatus" style="font-size:11px; color:var(--text-secondary)"></span>
-                </div>
-                <div id="refCharPreview" style="display:none; margin-bottom:6px;">
-                  <img id="refCharThumb" style="max-height:70px; border-radius:4px; border:1px solid var(--border-color);" />
-                </div>
-                <div style="display:flex; gap:6px; align-items:center;">
-                  <label class="btn btn-ghost btn-sm" style="cursor:pointer; font-size:12px;">
-                    Subir
-                    <input type="file" accept="image/*" style="display:none" onchange="uploadReferenceCharacter(this)" />
-                  </label>
-                  <button class="btn btn-ghost btn-sm" id="deleteRefCharBtn" style="display:none; color:#e74c3c; font-size:12px;" onclick="deleteReferenceCharacter()">Eliminar</button>
-                </div>
-              </div>
-              <!-- Style Reference -->
-              <div style="flex:1; min-width:180px;">
-                <div style="display:flex; align-items:center; gap:6px; margin-bottom:6px;">
-                  <span style="font-size:13px; font-weight:600;">Estilo</span>
-                  <span id="refStyleStatus" style="font-size:11px; color:var(--text-secondary)"></span>
-                </div>
-                <div id="refStylePreview" style="display:none; margin-bottom:6px;">
-                  <img id="refStyleThumb" style="max-height:70px; border-radius:4px; border:1px solid var(--border-color);" />
-                </div>
-                <div style="display:flex; gap:6px; align-items:center;">
-                  <label class="btn btn-ghost btn-sm" style="cursor:pointer; font-size:12px;">
-                    Subir
-                    <input type="file" accept="image/*" style="display:none" onchange="uploadReferenceStyle(this)" />
-                  </label>
-                  <button class="btn btn-ghost btn-sm" id="deleteRefStyleBtn" style="display:none; color:#e74c3c; font-size:12px;" onclick="deleteReferenceStyle()">Eliminar</button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="scenes-ready-header">
-            <span id="scenesReadyLabel">✅ Escenas listas para generar imágenes</span>
-            <span id="imagesProgressCount" class="images-progress-count" style="display:none"></span>
-          </div>
-          <button class="btn btn-primary btn-lg" id="generateImagesBtn" onclick="generateImages()">
-            🎨 Generar Imágenes
-          </button>
-          <button class="btn btn-success btn-lg" id="continueWithVideoBtn" style="display:none"
-            onclick="continueWithVideo()">
-            ▶️ Continuar con Video
-          </button>
-          <p class="scenes-ready-hint" id="scenesReadyHint">
-            Gemini generará un prompt visual por escena y el proveedor seleccionado creará la imagen.
-          </p>
-          <div id="veo3AnimationSection"
-            style="margin-top:20px; padding-top:20px; border-top:1px solid var(--border-color); display:none">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-              <h3>🎬 Animar Escenas</h3>
-              <span id="animationProgress" style="font-size:13px; color:var(--text-secondary);"></span>
-            </div>
-            <p class="scenes-ready-hint">Anima cada imagen con Meta AI (Playwright). Se abre el navegador por cada escena y descarga el video generado.</p>
-            <button class="btn btn-primary btn-lg" id="startVeo3AnimationBtn" onclick="startVeo3Animation()">
-              🤖 Animar con Meta AI
-            </button>
-          </div>
-
-        </div>
-
+        <!-- 4. Escenas table (shown first) -->
         <div class="chunks-section" id="chunksSection" style="display:none">
           <div class="chunks-section-header">
             <h2>Escenas <span id="chunksCount" class="chunks-count"></span></h2>
@@ -473,11 +431,109 @@
           </div>
         </div>
 
-        <!-- ── Go to Editing (after scenes table) ──────────────────── -->
+        <!-- 4b. Actions panel — below scenes table -->
+        <div class="scenes-ready-section" id="scenesReadySection" style="display:none">
+
+          <!-- Status header -->
+          <div class="scenes-ready-header">
+            <span id="scenesReadyLabel">Escenas listas para generar</span>
+            <span id="imagesProgressCount" class="images-progress-count" style="display:none"></span>
+          </div>
+
+          <!-- ── Animated mode controls ── -->
+          <div id="animatedModeControls">
+            <!-- Reference images: two upload cards side by side -->
+            <div id="referenceImagesSection" class="ref-section">
+              <div class="ref-section-label">
+                Referencias Kontext
+                <span class="ref-section-hint">opcionales — activan modelo kontext</span>
+              </div>
+              <div class="ref-cards">
+                <!-- Character Reference Card -->
+                <div class="ref-upload-card" id="refCharCard">
+                  <div id="refCharPreview" class="ref-preview" style="display:none;">
+                    <img id="refCharThumb" class="ref-thumb" />
+                  </div>
+                  <div class="ref-upload-icon" id="refCharIcon">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                  </div>
+                  <span class="ref-card-title">Personaje</span>
+                  <span class="ref-card-hint" id="refCharStatus"></span>
+                  <label class="ref-upload-btn">
+                    Subir
+                    <input type="file" accept="image/*" style="display:none" onchange="uploadReferenceCharacter(this)" />
+                  </label>
+                  <button class="ref-delete-btn" id="deleteRefCharBtn" style="display:none" onclick="deleteReferenceCharacter()">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                  </button>
+                </div>
+                <!-- Style Reference Card -->
+                <div class="ref-upload-card" id="refStyleCard">
+                  <div id="refStylePreview" class="ref-preview" style="display:none;">
+                    <img id="refStyleThumb" class="ref-thumb" />
+                  </div>
+                  <div class="ref-upload-icon" id="refStyleIcon">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22 12 18.56 5.82 22 7 14.14l-5-4.87 6.91-1.01z"/></svg>
+                  </div>
+                  <span class="ref-card-title">Estilo</span>
+                  <span class="ref-card-hint" id="refStyleStatus"></span>
+                  <label class="ref-upload-btn">
+                    Subir
+                    <input type="file" accept="image/*" style="display:none" onchange="uploadReferenceStyle(this)" />
+                  </label>
+                  <button class="ref-delete-btn" id="deleteRefStyleBtn" style="display:none" onclick="deleteReferenceStyle()">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Generate actions -->
+            <div class="scenes-actions-row">
+              <button class="btn btn-primary btn-lg" id="generateImagesBtn" onclick="generateImages()">
+                🎨 Generar Imagenes
+              </button>
+              <button class="btn btn-success btn-lg" id="continueWithVideoBtn" style="display:none" onclick="continueWithVideo()">
+                ▶️ Continuar con Video
+              </button>
+            </div>
+            <p class="scenes-ready-hint" id="scenesReadyHint">
+              Genera un prompt visual por escena, luego el proveedor creara la imagen (16:9).
+            </p>
+
+            <!-- Animation section -->
+            <div id="veo3AnimationSection" class="animate-section" style="display:none">
+              <div class="animate-section-header">
+                <h3>🎬 Animar Escenas</h3>
+                <span id="animationProgress" class="animate-progress-label"></span>
+              </div>
+              <p class="scenes-ready-hint">Anima cada imagen con Meta AI (Playwright). Se abre el navegador por cada escena y descarga el video generado.</p>
+              <button class="btn btn-primary btn-lg" id="startVeo3AnimationBtn" onclick="startVeo3Animation()">
+                🤖 Animar con Meta AI
+              </button>
+            </div>
+          </div>
+
+          <!-- ── Stock footage mode placeholder ── -->
+          <div id="stockModeControls" style="display:none;">
+            <div style="text-align:center; padding: 24px 0;">
+              <div style="font-size: 32px; margin-bottom: 8px;">📹</div>
+              <h3 style="margin-bottom: 6px; color: var(--text);">Modo Stock Footage</h3>
+              <p class="scenes-ready-hint" style="margin: 0 auto 16px;">Analiza las escenas y busca videos/imágenes de stock automáticamente.</p>
+              <button class="btn" id="btnSearchStockAssets" onclick="searchStockAssets()">
+                🔍 Buscar Assets de Stock
+              </button>
+            </div>
+            <div id="stockAssetsGrid" style="display:none; margin-top: 16px;"></div>
+          </div>
+
+        </div>
+
+        <!-- ── Go to Editing (after actions) ──────────────────── -->
         <div id="goToEditingSection"
           style="margin-top:20px; margin-bottom:20px; display:none">
           <button class="btn btn-primary btn-lg" id="goToEditingBtn" onclick="showView('editing', currentProjectId)" style="width:100%; padding:16px; font-size:16px;">
-            🎬 Ir a Edición — Renderizar Video Final
+            🎬 Ir a Edición — Renderizar Video
           </button>
         </div>
 
@@ -527,6 +583,15 @@
           <button class="btn-back" onclick="showView('detail', currentProjectId)">← Volver al Proyecto</button>
           <h1 id="editingTitle">Edición</h1>
           <span id="editingBadge" class="badge"></span>
+          <div style="flex:1;"></div>
+          <!-- Download last render (shown only when render exists) -->
+          <a id="editingHeaderDownload" class="btn btn-sm" style="display:none; background:#22c55e; color:#fff; padding:7px 14px; border-radius:8px; text-decoration:none; font-weight:600;" title="Descargar último render">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16" style="vertical-align:-2px;"><path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5"/><path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708z"/></svg>
+          </a>
+          <!-- Render button -->
+          <button class="btn btn-primary" id="editingRenderBtn" onclick="renderFinalVideo()" style="padding:7px 18px;">
+            🎬 Renderizar Video
+          </button>
         </div>
 
         <!-- Main editor area: preview + controls side by side -->
@@ -545,12 +610,9 @@
                 <span id="playerTimeDisplay" class="player-time">0:00 / 0:00</span>
               </div>
             </div>
-            <!-- Render button below preview -->
+            <!-- Render hint below preview -->
             <div class="editing-render-bar">
-              <button class="btn btn-primary" id="editingRenderBtn" onclick="renderFinalVideo()" style="flex:1;">
-                🎬 Renderizar Video Final
-              </button>
-              <span id="editingRenderHint" class="text-secondary" style="font-size:12px; margin-left:12px;">Listo</span>
+              <span id="editingRenderHint" class="text-secondary" style="font-size:12px;">Listo</span>
             </div>
             <!-- Render progress bar -->
             <div id="editingRenderProgress" class="render-progress-container" style="display:none">
@@ -593,10 +655,21 @@
             <button class="btn btn-sm btn-outline" id="btnBulkTransition" onclick="openBulkTransitionPopup()" title="Aplicar transición a todos los clips">🔀 Transiciones</button>
             <span class="timeline-hint" id="timelineDragHint">Arrastra los clips para reordenar</span>
           </div>
+          <!-- Playhead scrubber bar -->
+          <div class="timeline-scrubber-row">
+            <div class="timeline-track-label" style="font-size:9px; color:var(--text3);">0:00</div>
+            <div class="timeline-scrubber" id="timelineScrubber" onclick="timelineScrubberSeek(event)">
+              <div class="timeline-scrubber-fill" id="timelineScrubberFill"></div>
+              <div class="timeline-playhead" id="timelinePlayhead"></div>
+            </div>
+            <div class="timeline-scrubber-time" id="timelineScrubberTime">0:00</div>
+          </div>
           <!-- Video track -->
-          <div class="timeline-track">
+          <div class="timeline-track" style="position:relative;">
             <div class="timeline-track-label">🎥 Video</div>
             <div class="timeline-track-clips" id="editingTimeline"></div>
+            <!-- Moving playhead line over clips -->
+            <div class="timeline-clip-playhead" id="timelineClipPlayhead"></div>
           </div>
           <!-- Audio track -->
           <div class="timeline-track timeline-track-audio">
@@ -986,8 +1059,11 @@
     </div>
   </div>
 
-  <script src="/static/js/canvas-player.js?v=20260309j"></script>
-  <script src="/static/js/app.js?v=20260309j"></script>
+  <!-- Chain Config Modal -->
+  <div id="chainModal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);align-items:center;justify-content:center;"></div>
+
+  <script src="/static/js/canvas-player.js?v=20260310c"></script>
+  <script src="/static/js/app.js?v=20260312a"></script>
 </body>
 
 </html>

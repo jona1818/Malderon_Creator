@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List
 
+import requests as http_requests
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
@@ -15,7 +16,7 @@ from ..database import get_db
 from ..models import Project, Chunk, ProjectStatus, AppSetting
 from ..schemas import ProjectCreate, ProjectOut, ProjectListItem, ScriptApprovalPayload, ResplitPayload, VoiceConfigPayload
 from ..config import PROJECTS_PATH, settings as app_settings
-from ..services.pipeline_service import start_pipeline, start_pipeline_phase2, start_regenerate_script, start_generate_voiceover, start_pipeline_phase3, start_create_scenes_from_srt, start_generate_images, start_retry_chunk_image, start_generate_motion_prompts, start_animate_scenes, start_regenerate_image_genaipro, start_regenerate_all_genaipro
+from ..services.pipeline_service import start_pipeline, start_pipeline_phase2, start_regenerate_script, start_generate_voiceover, start_pipeline_phase3, start_create_scenes_from_srt, start_generate_images, start_stock_asset_search, start_retry_chunk_image, start_generate_motion_prompts, start_animate_scenes, start_regenerate_image_genaipro, start_regenerate_all_genaipro
 from ..services.render_service import start_render_final, render_transition_preview
 from pydantic import BaseModel
 
@@ -98,6 +99,7 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
         reference_character=payload.reference_character,
         reference_transcripts=payload.reference_transcripts,
         target_chunk_size=payload.target_chunk_size,
+        collection=payload.collection or "general",
         status=ProjectStatus.queued,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
@@ -109,6 +111,87 @@ def create_project(payload: ProjectCreate, db: Session = Depends(get_db)):
     # Launch background pipeline
     start_pipeline(project.id)
     return project
+
+
+@router.get("/collections/list")
+def list_collections(db: Session = Depends(get_db)):
+    """Fetch collections from clip bank; fall back to local DB."""
+    bank = app_settings.clip_bank_url
+    if bank:
+        try:
+            r = http_requests.get(f"{bank}/api/collections", timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                # Clip bank returns list of collection objects
+                cols = []
+                for c in data if isinstance(data, list) else data.get("collections", []):
+                    if isinstance(c, dict):
+                        cols.append({
+                            "name": c.get("name", ""),
+                            "icon": c.get("icon", "📁"),
+                            "display_name": c.get("display_name", c.get("name", "")),
+                        })
+                    else:
+                        cols.append({"name": c, "icon": "📁", "display_name": c})
+                # Ensure general exists
+                if not any(c["name"] == "general" for c in cols):
+                    cols.insert(0, {"name": "general", "icon": "📦", "display_name": "general"})
+                return {"collections": cols, "source": "clip_bank"}
+        except Exception:
+            pass
+    # Fallback: local DB
+    rows = (
+        db.query(Project.collection)
+        .filter(Project.mode == "stock", Project.collection.isnot(None))
+        .distinct()
+        .all()
+    )
+    names = sorted({r[0] for r in rows if r[0]} | {"general"})
+    cols = [{"name": n, "icon": "📁", "display_name": n} for n in names]
+    cols[0]["icon"] = "📦"  # general
+    return {"collections": cols, "source": "local"}
+
+
+@router.post("/collections/create")
+def create_collection(payload: dict):
+    """Create a new collection in the clip bank."""
+    bank = app_settings.clip_bank_url
+    if not bank:
+        return {"ok": True, "source": "local", "name": payload.get("name", "")}
+    try:
+        r = http_requests.post(f"{bank}/api/collections", json=payload, timeout=10)
+        r.raise_for_status()
+        return {"ok": True, "source": "clip_bank", "data": r.json()}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Clip bank error: {e}")
+
+
+@router.get("/collections/{col_name}/chain")
+def get_collection_chain(col_name: str):
+    """Get search chain config for a collection from clip bank."""
+    bank = app_settings.clip_bank_url
+    if not bank:
+        raise HTTPException(status_code=404, detail="Clip bank not configured")
+    try:
+        r = http_requests.get(f"{bank}/api/collections/{col_name}", timeout=5)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Clip bank error: {e}")
+
+
+@router.put("/collections/{col_name}/chain")
+def update_collection_chain(col_name: str, payload: dict):
+    """Update search chain config for a collection in clip bank."""
+    bank = app_settings.clip_bank_url
+    if not bank:
+        raise HTTPException(status_code=404, detail="Clip bank not configured")
+    try:
+        r = http_requests.put(f"{bank}/api/collections/{col_name}", json=payload, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Clip bank error: {e}")
 
 
 @router.get("/{project_id}", response_model=ProjectOut)
@@ -524,6 +607,24 @@ def generate_images(project_id: int, db: Session = Depends(get_db)):
     db.refresh(project)
 
     start_generate_images(project.id)
+    return project
+
+
+@router.post("/{project_id}/search-stock-assets", response_model=ProjectOut)
+def search_stock_assets(project_id: int, db: Session = Depends(get_db)):
+    """Analyze scenes and search/download stock footage assets."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.status not in (ProjectStatus.scenes_ready, ProjectStatus.images_ready, ProjectStatus.error):
+        raise HTTPException(status_code=400, detail="El proyecto no está en un estado válido para buscar assets")
+
+    project.status = ProjectStatus.queued
+    project.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(project)
+
+    start_stock_asset_search(project.id)
     return project
 
 

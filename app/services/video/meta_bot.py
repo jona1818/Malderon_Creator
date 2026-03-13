@@ -3,11 +3,14 @@
 Cookie/session is persisted in `meta_session/` at the project root.
 For parallel execution, sessions are cloned to `meta_session_N/` directories.
 Meta AI actively detects headless browsers, so we always run in headful mode.
+
+Uses SYNC Playwright API (Python 3.14 on Windows breaks async subprocess).
 """
-import asyncio
 import shutil
+import time
+import threading
 from pathlib import Path
-from playwright.async_api import async_playwright
+from playwright.sync_api import sync_playwright
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -44,7 +47,7 @@ def prepare_parallel_sessions(num_workers: int = 5):
     for i in range(1, num_workers):
         dst = _worker_session_dir(i)
         if dst.exists():
-            continue  # already created
+            continue
         print(f"[META] Cloning session to {dst.name}...")
         shutil.copytree(str(META_SESSION_DIR), str(dst), dirs_exist_ok=True)
     print(f"[META] {num_workers} parallel sessions ready.")
@@ -52,34 +55,34 @@ def prepare_parallel_sessions(num_workers: int = 5):
 
 # ── Login helper ──────────────────────────────────────────────────────────────
 
-async def setup_meta_login():
+def setup_meta_login():
     META_SESSION_DIR.mkdir(parents=True, exist_ok=True)
     print(f"[META] Session directory: {META_SESSION_DIR}")
 
-    async with async_playwright() as p:
-        ctx = await p.chromium.launch_persistent_context(
+    with sync_playwright() as p:
+        ctx = p.chromium.launch_persistent_context(
             user_data_dir=str(META_SESSION_DIR),
             headless=False,
             args=_BROWSER_ARGS,
             viewport={"width": 1280, "height": 800},
         )
-        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-        await page.goto("https://www.meta.ai/")
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        page.goto("https://www.meta.ai/media")
 
         print("[META] Login window open — please log in and close the browser when done.")
         try:
-            await page.wait_for_event("close", timeout=0)
+            page.wait_for_event("close", timeout=0)
         except Exception:
             pass
         finally:
-            await ctx.close()
+            ctx.close()
 
     print(f"[META] Session saved: {META_SESSION_DIR}")
 
 
 # ── Selector helpers ──────────────────────────────────────────────────────────
 
-async def _find_textarea(page):
+def _find_textarea(page):
     selectors = [
         '[aria-label*="message" i][contenteditable="true"]',
         'div[contenteditable="true"][role="textbox"]',
@@ -91,19 +94,19 @@ async def _find_textarea(page):
     for sel in selectors:
         try:
             el = page.locator(sel).first
-            await el.wait_for(state="visible", timeout=5_000)
+            el.wait_for(state="visible", timeout=5_000)
             return el
         except Exception:
             continue
     return None
 
 
-async def _attach_image(page, image_path: str) -> bool:
+def _attach_image(page, image_path: str) -> bool:
     # Strategy 1: direct file input
     try:
         fi = page.locator("input[type='file']").first
-        await fi.wait_for(state="attached", timeout=10_000)
-        await fi.set_input_files(image_path)
+        fi.wait_for(state="attached", timeout=10_000)
+        fi.set_input_files(image_path)
         return True
     except Exception:
         pass
@@ -122,34 +125,34 @@ async def _attach_image(page, image_path: str) -> bool:
     for sel in attach_selectors:
         try:
             btn = page.locator(sel).first
-            await btn.wait_for(state="visible", timeout=5_000)
-            async with page.expect_file_chooser(timeout=10_000) as fc_info:
-                await btn.click()
-            fc = await fc_info.value
-            await fc.set_files(image_path)
+            btn.wait_for(state="visible", timeout=5_000)
+            with page.expect_file_chooser(timeout=10_000) as fc_info:
+                btn.click()
+            fc = fc_info.value
+            fc.set_files(image_path)
             return True
         except Exception:
             continue
 
     # Strategy 3: fallback
     try:
-        await page.set_input_files("input[type='file']", image_path)
+        page.set_input_files("input[type='file']", image_path)
         return True
     except Exception:
         pass
     return False
 
 
-async def _save_debug_screenshot(page, output_path: str, label: str) -> str:
+def _save_debug_screenshot(page, output_path: str, label: str) -> str:
     try:
         debug = str(Path(output_path).parent / f"meta_debug_{label}.png")
-        await page.screenshot(path=debug, full_page=True)
+        page.screenshot(path=debug, full_page=True)
         return debug
     except Exception:
         return "(screenshot failed)"
 
 
-async def _download_video(page, video_el, output_path: str):
+def _download_video(page, video_el, output_path: str):
     """Try multiple strategies to download the generated video."""
 
     # Strategy A: Download button
@@ -165,11 +168,11 @@ async def _download_video(page, video_el, output_path: str):
     for sel in dl_selectors:
         try:
             candidate = page.locator(sel).last
-            await candidate.wait_for(state="visible", timeout=5_000)
-            async with page.expect_download(timeout=ELEMENT_TIMEOUT) as dl_info:
-                await candidate.click()
-            download = await dl_info.value
-            await download.save_as(output_path)
+            candidate.wait_for(state="visible", timeout=5_000)
+            with page.expect_download(timeout=ELEMENT_TIMEOUT) as dl_info:
+                candidate.click()
+            download = dl_info.value
+            download.save_as(output_path)
             return
         except Exception:
             continue
@@ -177,16 +180,16 @@ async def _download_video(page, video_el, output_path: str):
     # Strategy B: Extract video src URL
     import httpx as _httpx
 
-    video_src = await video_el.get_attribute("src")
+    video_src = video_el.get_attribute("src")
     if not video_src:
         try:
             source_el = video_el.locator("source").first
-            video_src = await source_el.get_attribute("src")
+            video_src = source_el.get_attribute("src")
         except Exception:
             pass
 
     if not video_src:
-        video_src = await page.evaluate("""
+        video_src = page.evaluate("""
             () => {
                 const v = document.querySelector('video');
                 return v ? v.src || v.currentSrc : null;
@@ -194,90 +197,169 @@ async def _download_video(page, video_el, output_path: str):
         """)
 
     if video_src and video_src.startswith("http"):
-        async with _httpx.AsyncClient(timeout=120.0) as http:
-            r = await http.get(video_src)
+        import httpx as _httpx
+        with _httpx.Client(timeout=120.0) as http:
+            r = http.get(video_src)
             r.raise_for_status()
             Path(output_path).write_bytes(r.content)
         return
 
-    scr = await _save_debug_screenshot(page, output_path, "no_src")
+    scr = _save_debug_screenshot(page, output_path, "no_src")
     raise RuntimeError(f"Could not extract video URL. Debug screenshot: {scr}")
+
+
+def _switch_to_video_mode(page, tag: str, output_path: str) -> bool:
+    """Click the 'Imagen' dropdown then select 'Vídeo'. Returns True on success."""
+
+    # 1. Open the dropdown by clicking the "Imagen" pill
+    dropdown_opened = False
+    for sel in [
+        'button:has-text("Imagen")',
+        '[role="button"]:has-text("Imagen")',
+        'span:has-text("Imagen")',
+        'button:has-text("Image")',
+    ]:
+        try:
+            btn = page.locator(sel).first
+            btn.wait_for(state="visible", timeout=5_000)
+            btn.click()
+            time.sleep(2)
+            dropdown_opened = True
+            print(f"{tag} Dropdown opened.")
+            break
+        except Exception:
+            continue
+
+    if not dropdown_opened:
+        scr = _save_debug_screenshot(page, output_path, "no_dropdown")
+        print(f"{tag} WARNING: Could not open Imagen dropdown. Screenshot: {scr}")
+        return False
+
+    # 2. Click "Vídeo" via JavaScript
+    clicked = page.evaluate("""
+        () => {
+            const targets = ['Vídeo', 'Video', 'vídeo', 'video'];
+            const all = document.querySelectorAll('*');
+            for (const el of all) {
+                const text = (el.textContent || '').trim();
+                const inner = (el.innerText || '').trim();
+                const isLeaf = el.children.length === 0 ||
+                    (el.children.length <= 2 && inner.length < 20);
+                if (isLeaf && targets.includes(text) && el.offsetParent !== null) {
+                    el.click();
+                    return text;
+                }
+            }
+            return null;
+        }
+    """)
+
+    if clicked:
+        print(f"{tag} Switched to Video mode (clicked '{clicked}').")
+        time.sleep(1)
+        return True
+
+    # 3. Fallback: Playwright text selectors
+    for v_sel in [
+        'text="Vídeo"', 'text="Video"',
+        'div:text-is("Vídeo")', 'span:text-is("Vídeo")',
+        'div:text-is("Video")', 'span:text-is("Video")',
+    ]:
+        try:
+            v_btn = page.locator(v_sel).last
+            v_btn.wait_for(state="visible", timeout=2_000)
+            v_btn.click()
+            time.sleep(1)
+            print(f"{tag} Switched to Video mode via fallback selector.")
+            return True
+        except Exception:
+            continue
+
+    scr = _save_debug_screenshot(page, output_path, "no_video_option")
+    print(f"{tag} WARNING: Could not select Vídeo option. Screenshot: {scr}")
+    return False
 
 
 # ── Single scene in an existing page ─────────────────────────────────────────
 
-async def _animate_in_page(page, image_path: str, motion_prompt: str,
-                           output_path: str, tag: str):
+def _animate_in_page(page, image_path: str, motion_prompt: str,
+                     output_path: str, tag: str):
     """
-    Animate one scene using an already-open browser page.
-    Navigates to meta.ai (new chat), attaches image, sends prompt, downloads video.
+    Animate an image using Meta AI in Video mode.
+    Navigates to meta.ai/media, attaches image, switches to Video mode, sends prompt, downloads video.
     """
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"{tag} Navigating to meta.ai…")
-    await page.goto(
+    print(f"{tag} Navigating to meta.ai...")
+    page.goto(
         "https://www.meta.ai/",
         wait_until="networkidle",
         timeout=NAV_TIMEOUT,
     )
-    await asyncio.sleep(3)
+    time.sleep(3)
 
     # Step 1: Attach image
-    attached = await _attach_image(page, image_path)
+    attached = _attach_image(page, image_path)
     if not attached:
-        scr = await _save_debug_screenshot(page, output_path, "no_attach")
+        scr = _save_debug_screenshot(page, output_path, "no_attach")
         raise RuntimeError(f"Could not attach image. Debug: {scr}")
-    await asyncio.sleep(2)
+    time.sleep(2)
 
     # Step 2: Fill prompt
-    textarea = await _find_textarea(page)
+    textarea = _find_textarea(page)
     if not textarea:
-        scr = await _save_debug_screenshot(page, output_path, "no_textarea")
+        scr = _save_debug_screenshot(page, output_path, "no_textarea")
         raise RuntimeError(f"Could not find chat input. Debug: {scr}")
 
     full_prompt = (
         f"{motion_prompt}. "
-        "Animate this image exactly as described. "
+        "Animate this image with natural smooth motion. "
         "Do not change the art style, colors, or characters."
     )
-    await textarea.click()
-    await textarea.fill(full_prompt)
-    await asyncio.sleep(1)
-    await textarea.press("Enter")
-    print(f"{tag} Prompt sent: {full_prompt[:80]}…")
+    textarea.click()
+    textarea.fill(full_prompt)
+    time.sleep(1)
 
-    # Step 3: Wait for video
+    # Count existing video elements BEFORE submitting
+    existing_video_count = page.locator("video").count()
+    print(f"{tag} Existing videos before submit: {existing_video_count}")
+
+    textarea.press("Enter")
+    print(f"{tag} Prompt sent: {full_prompt[:80]}...")
+
+    # Step 3: Wait for a NEW video element
     video_el = None
-    loop = asyncio.get_event_loop()
-    deadline = loop.time() + (GENERATION_TIMEOUT / 1000)
-    while loop.time() < deadline:
+    deadline = time.monotonic() + (GENERATION_TIMEOUT / 1000)
+    while time.monotonic() < deadline:
         try:
-            vid = page.locator("video").last
-            await vid.wait_for(state="visible", timeout=10_000)
-            video_el = vid
-            print(f"{tag} Video element detected!")
-            break
+            current_count = page.locator("video").count()
+            if current_count > existing_video_count:
+                vid = page.locator("video").last
+                vid.wait_for(state="visible", timeout=10_000)
+                video_el = vid
+                print(f"{tag} NEW video detected! (was {existing_video_count}, now {current_count})")
+                break
         except Exception:
             pass
-        await asyncio.sleep(5)
+        time.sleep(5)
 
     if not video_el:
-        scr = await _save_debug_screenshot(page, output_path, "no_video")
+        scr = _save_debug_screenshot(page, output_path, "no_video")
         raise RuntimeError(
             f"No video after {GENERATION_TIMEOUT // 1000}s. Debug: {scr}"
         )
 
-    await asyncio.sleep(3)
+    time.sleep(5)
 
     # Step 4: Download
-    await _download_video(page, video_el, output_path)
+    _download_video(page, video_el, output_path)
     print(f"{tag} Animation saved: {output_path}")
 
 
 # ── Standalone single-scene entry point (opens/closes browser) ───────────────
 
-async def animate_scene(image_path: str, motion_prompt: str, output_path: str,
-                        worker_id: int = 0):
+def animate_scene(image_path: str, motion_prompt: str, output_path: str,
+                  worker_id: int = 0):
     """
     Automate Meta AI to generate a short video clip from a still image.
     Opens and closes its own browser — use animate_batch() for multiple scenes.
@@ -288,30 +370,28 @@ async def animate_scene(image_path: str, motion_prompt: str, output_path: str,
 
     tag = f"[META-W{worker_id}]"
 
-    async with async_playwright() as p:
-        ctx = await p.chromium.launch_persistent_context(
+    with sync_playwright() as p:
+        ctx = p.chromium.launch_persistent_context(
             user_data_dir=str(session_dir),
             headless=False,
             args=_BROWSER_ARGS,
             viewport={"width": 1280, "height": 800},
         )
-        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.set_default_timeout(ELEMENT_TIMEOUT)
         try:
-            await _animate_in_page(page, image_path, motion_prompt,
-                                   output_path, tag)
+            _animate_in_page(page, image_path, motion_prompt,
+                             output_path, tag)
         finally:
-            await ctx.close()
+            ctx.close()
 
 
 # ── Batch parallel animation ─────────────────────────────────────────────────
 
-async def _worker_loop(worker_id: int, queue: asyncio.Queue,
-                       results: list, total: int,
-                       on_scene_done=None):
+def _worker_loop(worker_id: int, tasks: list, results: list, total: int,
+                 lock: threading.Lock, on_scene_done=None):
     """
-    Single worker: opens ONE browser, processes ALL queued scenes, then closes.
-    The browser stays open between scenes — only navigates to a new meta.ai chat.
+    Single worker thread: opens ONE browser, processes tasks from shared list.
     """
     tag = f"[META-W{worker_id}]"
     session_dir = _worker_session_dir(worker_id)
@@ -319,64 +399,74 @@ async def _worker_loop(worker_id: int, queue: asyncio.Queue,
         print(f"{tag} Session dir not found: {session_dir}, skipping worker.")
         return
 
-    async with async_playwright() as p:
-        ctx = await p.chromium.launch_persistent_context(
+    with sync_playwright() as p:
+        ctx = p.chromium.launch_persistent_context(
             user_data_dir=str(session_dir),
             headless=False,
             args=_BROWSER_ARGS,
             viewport={"width": 1280, "height": 800},
         )
-        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.set_default_timeout(ELEMENT_TIMEOUT)
 
         try:
             while True:
-                try:
-                    item = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
+                # Grab next task from shared list
+                with lock:
+                    if not tasks:
+                        break
+                    item = tasks.pop(0)
                 chunk_number, image_path, motion_prompt, output_path = item
                 try:
-                    print(f"{tag} Starting scene #{chunk_number}…")
-                    await _animate_in_page(page, image_path, motion_prompt,
-                                           output_path, tag)
-                    results.append((chunk_number, None))
+                    print(f"{tag} Starting scene #{chunk_number}...")
+                    _animate_in_page(page, image_path, motion_prompt,
+                                     output_path, tag)
+                    with lock:
+                        results.append((chunk_number, None))
                     if on_scene_done:
                         on_scene_done(chunk_number, None)
                     done = sum(1 for _, e in results if e is None)
                     print(f"{tag} Scene #{chunk_number} done ({done}/{total})")
                 except Exception as exc:
-                    results.append((chunk_number, str(exc)))
+                    with lock:
+                        results.append((chunk_number, str(exc)))
                     if on_scene_done:
                         on_scene_done(chunk_number, str(exc))
                     print(f"{tag} Scene #{chunk_number} FAILED: {exc}")
         finally:
             print(f"{tag} All tasks done, closing browser.")
-            await ctx.close()
+            ctx.close()
 
 
-async def animate_batch(tasks: list[tuple], num_workers: int = 5,
-                        on_scene_done=None):
+def animate_batch(tasks_input: list[tuple], num_workers: int = 5,
+                  on_scene_done=None):
     """
-    Animate multiple scenes in parallel using N browser workers.
+    Animate multiple scenes in parallel using N browser worker threads.
     Each worker opens ONE browser and reuses it for all its scenes.
 
-    tasks: list of (chunk_number, image_path, motion_prompt, output_path)
+    tasks_input: list of (chunk_number, image_path, motion_prompt, output_path)
     on_scene_done: optional callback(chunk_number, error_or_None) called after each scene
     Returns: list of (chunk_number, error_or_None)
     """
     prepare_parallel_sessions(num_workers)
 
-    queue = asyncio.Queue()
-    for t in tasks:
-        queue.put_nowait(t)
-
+    # Shared mutable list + lock for thread-safe task distribution
+    task_list = list(tasks_input)
     results: list[tuple[int, str | None]] = []
-    total = len(tasks)
+    total = len(task_list)
+    lock = threading.Lock()
 
-    workers = [
-        _worker_loop(i, queue, results, total, on_scene_done=on_scene_done)
-        for i in range(num_workers)
-    ]
-    await asyncio.gather(*workers)
+    threads = []
+    for i in range(num_workers):
+        t = threading.Thread(
+            target=_worker_loop,
+            args=(i, task_list, results, total, lock, on_scene_done),
+            daemon=True,
+        )
+        threads.append(t)
+        t.start()
+
+    for t in threads:
+        t.join()
+
     return results

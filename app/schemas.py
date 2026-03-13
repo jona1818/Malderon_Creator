@@ -15,6 +15,7 @@ class ProjectCreate(BaseModel):
     reference_character: Optional[str] = None
     reference_transcripts: Optional[str] = None  # JSON string of [{url, title, transcript}]
     target_chunk_size: int = 1500
+    collection: Optional[str] = "general"
 
 
 class ChunkOut(BaseModel):
@@ -34,6 +35,9 @@ class ChunkOut(BaseModel):
     transition_duration: Optional[int] = 500
     start_ms: Optional[int] = None
     end_ms: Optional[int] = None
+    asset_type: Optional[str] = None
+    asset_source: Optional[str] = None
+    overlay_text: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -63,6 +67,7 @@ class ProjectOut(BaseModel):
     error_message: Optional[str]
     final_video_path: Optional[str]
     render_progress: int = 0
+    collection: Optional[str] = "general"
     created_at: datetime
     updated_at: datetime
     chunks: List[ChunkOut] = []

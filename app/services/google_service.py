@@ -39,8 +39,13 @@ def _chat(system: str, user: str, max_tokens: int = 4096) -> str:
 
 # ── Batch Image Prompt Generation ────────────────────────────────────────────
 
-_BATCH_PROMPT_SYSTEM = """You are a visual prompt engineer for cinematic AI image generation.
-Create detailed, photorealistic image prompts for a documentary-style YouTube video.
+_BATCH_PROMPT_SYSTEM = """You are an expert visual prompt engineer for cinematic AI image generation.
+You will receive the FULL SCRIPT of a video for context, and a list of scenes.
+For each scene, generate a detailed image prompt that reflects the EXACT moment in the story.
+
+IMPORTANT: Use the full script to understand WHO the characters are, WHERE the story takes place,
+WHAT TIME PERIOD it is set in, and WHAT IS HAPPENING narratively. Each image must feel like it
+belongs to this specific story, not a generic image.
 
 CRITICAL RULES FOR VISUAL CONSISTENCY:
 - Every prompt must share the SAME visual style: cinematic, dark moody lighting, rich color grading.
@@ -51,53 +56,97 @@ CRITICAL RULES FOR VISUAL CONSISTENCY:
 - Focus on: landscapes, architecture, objects, environments, abstract concepts, aerial views, macro details.
 - Aspect ratio: 16:9 widescreen. No text, no watermarks, no logos, no borders.
 - Each prompt must be self-contained (describe everything needed to generate the image).
+- Include story-specific details: locations, objects, symbols, time period, atmosphere from the script.
 
 For each scene, produce a rich, comma-separated description including:
-- Subject and composition
+- Subject and composition (specific to the story moment)
 - Lighting and color palette
 - Camera angle and lens (e.g., wide-angle, telephoto, drone shot)
-- Mood and atmosphere
-- Textures and details
+- Mood and atmosphere (matching the narrative tone)
+- Textures, details, and story-specific elements
 
 Return ONLY valid JSON — no markdown fences, no extra text."""
 
-_BATCH_PROMPT_TEMPLATE = """Generate detailed cinematic image prompts for all scenes in this video.
+_BATCH_PROMPT_TEMPLATE = """Generate detailed cinematic image prompts for the scenes listed below.
 
-Visual style reference: {reference_style}
+VISUAL STYLE: {reference_style}
 
-Scenes:
+══════════════════════════════════════
+FULL SCRIPT (for narrative context — read this to understand the story, characters, locations, and time period):
+══════════════════════════════════════
+{full_script}
+
+══════════════════════════════════════
+SCENES TO GENERATE PROMPTS FOR:
+══════════════════════════════════════
 {scenes_block}
+
+For each scene, generate an image prompt that captures the EXACT narrative moment described.
+Use specific details from the script (locations, objects, atmosphere, time period) — NOT generic images.
 
 Return JSON:
 {{
   "prompts": [
     {{
       "scene_number": 1,
-      "image_prompt": "Detailed cinematic prompt for scene 1..."
+      "image_prompt": "Detailed cinematic prompt for scene 1 with story-specific details..."
     }},
     ...
   ]
 }}"""
 
+# Max words before we chunk the batch into groups of 10
+_MAX_SCRIPT_WORDS_SINGLE_BATCH = 3000
+_SCENES_PER_BATCH = 10
+
 
 def batch_generate_image_prompts(
     scenes: list[dict],
     reference_character: str = "",
+    full_script: str = "",
 ) -> dict[int, str]:
-    """Send all scenes in ONE call and return {scene_number: prompt}.
+    """Send scenes + full script context to Gemini and return {scene_number: prompt}.
 
-    Uses OpenRouter (Gemini) instead of Google API directly.
+    If the script is long (>3000 words), scenes are processed in batches of 10
+    but the full script is always included for context.
     """
+    style = reference_character or "cinematic, photorealistic, documentary, dark moody lighting, no people"
+    script_text = (full_script or "").strip()
+    if not script_text:
+        script_text = "(No full script provided — use each scene's narration as context.)"
+
+    # Truncate script to ~4000 words max to avoid token limits
+    script_words = script_text.split()
+    if len(script_words) > 4000:
+        script_text = " ".join(script_words[:4000]) + "\n\n[... script truncated for length ...]"
+
+    word_count = len(script_words)
+    need_chunking = word_count > _MAX_SCRIPT_WORDS_SINGLE_BATCH and len(scenes) > _SCENES_PER_BATCH
+
+    if need_chunking:
+        # Process in batches of 10 scenes, each batch gets the full script
+        all_results: dict[int, str] = {}
+        for i in range(0, len(scenes), _SCENES_PER_BATCH):
+            batch = scenes[i:i + _SCENES_PER_BATCH]
+            print(f"[ImagePrompts] Batch {i // _SCENES_PER_BATCH + 1}: scenes {batch[0]['scene_number']}-{batch[-1]['scene_number']}")
+            batch_result = _generate_batch(batch, style, script_text)
+            all_results.update(batch_result)
+        return all_results
+    else:
+        return _generate_batch(scenes, style, script_text)
+
+
+def _generate_batch(scenes: list[dict], style: str, script_text: str) -> dict[int, str]:
+    """Generate image prompts for a batch of scenes with full script context."""
     scenes_block = "\n".join(
         f"Scene {s['scene_number']}:\n"
-        f"  Narration: {s['narration'][:300]}\n"
-        f"  Visual description: {s.get('visual_description', '')[:200]}"
+        f"  Narration: {s['narration'][:400]}"
         for s in scenes
     )
 
-    style = reference_character or "cinematic, photorealistic, documentary, dark moody lighting, no people"
     prompt = _BATCH_PROMPT_TEMPLATE.format(
         reference_style=style,
+        full_script=script_text,
         scenes_block=scenes_block,
     )
 

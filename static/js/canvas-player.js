@@ -107,6 +107,22 @@ class CanvasPlayer {
     this._startChunk(arrIdx - 1, seekMs);
   }
 
+  seekTo(ms) {
+    const targetMs = Math.max(0, Math.min(ms, this.totalDurMs));
+    // Find which chunk contains this time
+    let idx = 0;
+    for (let i = this._offsets.length - 1; i >= 0; i--) {
+      if (targetMs >= this._offsets[i]) { idx = i; break; }
+    }
+    this.stop();
+    this.currentIdx = idx;
+    this.state = 'playing';
+    const offsetInChunk = targetMs - this._offsets[idx];
+    this._showCanvas();
+    this._fireStateChange();
+    this._startChunk(idx, offsetInChunk);
+  }
+
   updateChunks(chunks) {
     this.chunks = chunks;
     this._offsets = [];

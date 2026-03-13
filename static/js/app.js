@@ -77,15 +77,18 @@ async function loadDashboard() {
   try {
     const projects = await apiFetch('/api/projects/');
     const list = document.getElementById('projectList');
-    const empty = document.getElementById('emptyState');
 
     list.innerHTML = '';
+
     if (!projects.length) {
-      list.appendChild(empty);
-      empty.style.display = '';
+      list.innerHTML = `
+        <div class="empty-state" id="emptyState">
+          <div class="empty-icon">🎥</div>
+          <p>No hay proyectos todavía.</p>
+          <button class="btn btn-primary" onclick="showView('new')">Crear primer video</button>
+        </div>`;
       return;
     }
-    empty.style.display = 'none';
 
     projects.forEach(p => {
       const pct = p.chunk_count > 0 ? Math.round((p.chunks_done / p.chunk_count) * 100) : 0;
@@ -97,6 +100,7 @@ async function loadDashboard() {
           <div class="project-card-title">${escHtml(p.title)}</div>
           <div class="project-card-meta">
             <span class="badge badge-${p.status}">${p.status.toUpperCase()}</span>
+            ${p.mode === 'stock' && p.collection ? `<span style="font-size:11px;color:var(--muted);">📁 ${escHtml(p.collection)}</span>` : ''}
             <span>${new Date(p.created_at).toLocaleDateString('es-ES', { day: '2-digit', month: 'short', year: 'numeric' })}</span>
             ${p.chunk_count > 0 ? `<span>${p.chunks_done}/${p.chunk_count} escenas</span>` : ''}
           </div>
@@ -170,6 +174,15 @@ async function refreshDetail(projectId) {
     const badge = document.getElementById('detailBadge');
     badge.textContent = p.status.toUpperCase();
     badge.className = `badge badge-${p.status}`;
+    const collBadge = document.getElementById('detailCollectionBadge');
+    if (collBadge) {
+      if (p.mode === 'stock' && p.collection) {
+        collBadge.textContent = `📁 ${p.collection}`;
+        collBadge.style.display = '';
+      } else {
+        collBadge.style.display = 'none';
+      }
+    }
 
     // ── Progress card (queued / processing / error) ───────────────────────
     const progressCard = document.getElementById('progressCard');
@@ -441,6 +454,41 @@ async function refreshDetail(projectId) {
     if (scenesReadySection) {
       scenesReadySection.style.display = showImagePanel ? '' : 'none';
 
+      // Toggle animated vs stock controls
+      const isStock = p.mode === 'stock';
+      const animatedControls = document.getElementById('animatedModeControls');
+      const stockControls = document.getElementById('stockModeControls');
+      if (animatedControls) animatedControls.style.display = isStock ? 'none' : '';
+      if (stockControls) stockControls.style.display = isStock ? '' : 'none';
+
+      // Render stock assets grid
+      if (isStock) {
+        const stockGrid = document.getElementById('stockAssetsGrid');
+        const hasAssets = chunks.some(c => c.asset_type);
+        if (stockGrid && hasAssets) {
+          stockGrid.style.display = '';
+          stockGrid.innerHTML = '<h4 style="margin-bottom:12px;color:var(--text);">Assets encontrados</h4>' +
+            '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;">' +
+            chunks.map(c => {
+              const src = c.asset_source || '?';
+              const atype = c.asset_type || 'pending';
+              const hasFile = c.video_path || c.image_path;
+              const badge = {pexels:'🟢 Pexels',pixabay:'🔵 Pixabay',nasa:'🚀 NASA',pollinations:'🎨 AI'}[src] || src;
+              const thumb = c.image_path ? `<img src="/api/projects/${p.id}/chunk/${c.chunk_number}/image" style="width:100%;height:120px;object-fit:cover;border-radius:6px;">` :
+                            c.video_path ? `<div style="width:100%;height:120px;background:var(--bg3);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:28px;">🎬</div>` :
+                            `<div style="width:100%;height:120px;background:var(--bg3);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:14px;color:var(--muted);">⏳ Pendiente</div>`;
+              return `<div style="background:var(--bg2);border-radius:8px;overflow:hidden;border:1px solid var(--border);">
+                ${thumb}
+                <div style="padding:8px;">
+                  <div style="font-size:12px;font-weight:600;color:var(--text);">Escena ${c.chunk_number}</div>
+                  <div style="font-size:11px;color:var(--muted);margin-top:2px;">${badge} · ${atype}</div>
+                  ${c.overlay_text ? `<div style="font-size:11px;color:var(--accent);margin-top:2px;">📝 ${c.overlay_text}</div>` : ''}
+                </div>
+              </div>`;
+            }).join('') + '</div>';
+        }
+      }
+
       // Character reference UI
       const charPreview = document.getElementById('refCharPreview');
       const charThumb = document.getElementById('refCharThumb');
@@ -564,9 +612,19 @@ async function refreshDetail(projectId) {
       goToEditingSection.style.display = showEditing ? '' : 'none';
       const btn = document.getElementById('goToEditingBtn');
       if (btn) {
-        if (p.final_video_path) btn.textContent = '🎬 Ir a Edición — Video Final Listo ✅';
-        else if (p.status === 'rendering') btn.textContent = '🎬 Ir a Edición — Renderizando…';
-        else btn.textContent = '🎬 Ir a Edición — Renderizar Video Final';
+        if (p.final_video_path) {
+          btn.textContent = '✅ Video Final Listo';
+          btn.style.background = 'var(--green)';
+          btn.style.borderColor = 'var(--green)';
+        } else if (p.status === 'rendering') {
+          btn.textContent = '⏳ Renderizando…';
+          btn.style.background = '';
+          btn.style.borderColor = '';
+        } else {
+          btn.textContent = '🎬 Ir a Edición';
+          btn.style.background = '';
+          btn.style.borderColor = '';
+        }
       }
     }
 
@@ -866,8 +924,239 @@ modeOptions.forEach(opt => {
     opt.classList.add('active');
     const isAnimated = opt.querySelector('input').value === 'animated';
     document.getElementById('characterGroup').style.display = isAnimated ? '' : 'none';
+    const collectionGroup = document.getElementById('collectionGroup');
+    if (collectionGroup) collectionGroup.style.display = isAnimated ? 'none' : '';
+    if (!isAnimated) loadCollections();
   });
 });
+
+let _selectedCollection = 'general';
+let _allCollections = []; // [{name, icon, display_name}]
+let _clipBankAvailable = false;
+
+const cbIcon = (n) => {
+  const col = _allCollections.find(c => c.name === n);
+  return col ? col.icon : '📁';
+};
+
+async function loadCollections() {
+  try {
+    const data = await apiFetch('/api/projects/collections/list');
+    _clipBankAvailable = data.source === 'clip_bank';
+    const cols = data.collections || [];
+    // Normalize: ensure objects with {name, icon, display_name}
+    _allCollections = cols.map(c =>
+      typeof c === 'string'
+        ? { name: c, icon: c === 'general' ? '📦' : '📁', display_name: c }
+        : c
+    );
+    // Ensure general is first
+    const gi = _allCollections.findIndex(c => c.name === 'general');
+    if (gi > 0) { const g = _allCollections.splice(gi, 1)[0]; _allCollections.unshift(g); }
+    else if (gi < 0) { _allCollections.unshift({ name: 'general', icon: '📦', display_name: 'general' }); }
+  } catch (_) {
+    _allCollections = [{ name: 'general', icon: '📦', display_name: 'general' }];
+  }
+  renderComboList();
+}
+
+function renderComboList(filterText = '') {
+  const ul = document.getElementById('cbList');
+  if (!ul) return;
+  const q = filterText.toLowerCase();
+  const filtered = q ? _allCollections.filter(c => c.name.includes(q) || c.display_name.toLowerCase().includes(q)) : _allCollections;
+  ul.innerHTML = filtered.map(c => `
+    <li class="${c.name === _selectedCollection ? 'selected' : ''}" onclick="cbSelect('${c.name}')">
+      <span>${c.icon}</span><span>${c.display_name || c.name}</span>
+      <span class="cb-chain-btn" onclick="event.stopPropagation(); openChainConfig('${c.name}')" title="Configurar cadena de búsqueda">⚙️</span>
+    </li>
+  `).join('');
+  const trimmed = filterText.trim().replace(/[^a-z0-9_]/g, '_').toLowerCase();
+  if (trimmed && !_allCollections.some(c => c.name === trimmed)) {
+    ul.innerHTML += `<li class="cb-add-new" onclick="cbCreateNew('${trimmed}')">
+      <span>➕</span><span>Crear "<strong>${trimmed}</strong>"</span>
+    </li>`;
+  }
+}
+
+function toggleCombo() {
+  const dd = document.getElementById('cbDropdown');
+  const trigger = document.getElementById('cbTrigger');
+  const search = document.getElementById('cbSearch');
+  const isOpen = dd.style.display !== 'none';
+  dd.style.display = isOpen ? 'none' : '';
+  trigger.classList.toggle('open', !isOpen);
+  if (!isOpen) { renderComboList(); search.value = ''; search.focus(); }
+}
+
+function filterCombo(val) { renderComboList(val); }
+
+function cbSelect(name) {
+  _selectedCollection = name;
+  document.getElementById('cbValue').textContent = `${cbIcon(name)} ${name}`;
+  document.getElementById('cbDropdown').style.display = 'none';
+  document.getElementById('cbTrigger').classList.remove('open');
+  document.getElementById('newCollectionInput').style.display = 'none';
+}
+
+async function cbCreateNew(name) {
+  document.getElementById('cbDropdown').style.display = 'none';
+  document.getElementById('cbTrigger').classList.remove('open');
+  const inp = document.getElementById('newCollectionInput');
+  const field = document.getElementById('collectionName');
+  inp.style.display = 'block';
+  field.value = name;
+  field.focus();
+  _selectedCollection = '__new__';
+  document.getElementById('cbValue').textContent = `➕ ${name}`;
+
+  // Create in clip bank if available
+  if (_clipBankAvailable) {
+    try {
+      await apiFetch('/api/projects/collections/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+    } catch (e) {
+      console.warn('[ClipBank] Could not create collection:', e);
+    }
+  }
+  // Add to local list
+  if (!_allCollections.some(c => c.name === name)) {
+    _allCollections.push({ name, icon: '📁', display_name: name });
+  }
+}
+
+function cbKeydown(e) {
+  if (e.key === 'Escape') {
+    document.getElementById('cbDropdown').style.display = 'none';
+    document.getElementById('cbTrigger')?.classList.remove('open');
+  } else if (e.key === 'Enter') {
+    const first = document.querySelector('#cbList li');
+    if (first) first.click();
+  }
+}
+
+/* ── Search Chain Configuration Modal ── */
+
+const CHAIN_SOURCES = [
+  { id: 'clip_bank', label: 'Banco de clips local', icon: '🗄️', fixed: 'first' },
+  { id: 'youtube',   label: 'YouTube',              icon: '▶️' },
+  { id: 'pexels',    label: 'Pexels',               icon: '📷' },
+  { id: 'pixabay',   label: 'Pixabay',              icon: '📷' },
+  { id: 'internet_archive', label: 'Internet Archive', icon: '🏛️' },
+  { id: 'nara',      label: 'NARA',                 icon: '🏛️' },
+  { id: 'ai_fallback', label: 'IA Fallback',        icon: '🤖', fixed: 'last' },
+];
+
+let _chainModalCol = null;
+let _chainOrder = [];
+let _chainEnabled = {};
+
+async function openChainConfig(colName) {
+  _chainModalCol = colName;
+  try {
+    const data = await apiFetch(`/api/projects/collections/${colName}/chain`);
+    const chain = data.search_chain || CHAIN_SOURCES.map(s => s.id);
+    const disabled = data.disabled_sources || [];
+    _chainOrder = chain;
+    _chainEnabled = {};
+    CHAIN_SOURCES.forEach(s => { _chainEnabled[s.id] = !disabled.includes(s.id); });
+  } catch (_) {
+    _chainOrder = CHAIN_SOURCES.map(s => s.id);
+    _chainEnabled = {};
+    CHAIN_SOURCES.forEach(s => { _chainEnabled[s.id] = true; });
+  }
+  renderChainModal();
+  document.getElementById('chainModal').style.display = 'flex';
+}
+
+function renderChainModal() {
+  const modal = document.getElementById('chainModal');
+  if (!modal) return;
+  const orderedSources = _chainOrder.map(id => CHAIN_SOURCES.find(s => s.id === id)).filter(Boolean);
+  const listHtml = orderedSources.map((s, i) => {
+    const enabled = _chainEnabled[s.id] !== false;
+    const draggable = !s.fixed;
+    return `<li class="chain-item ${enabled ? '' : 'disabled'} ${s.fixed ? 'fixed' : ''}"
+                draggable="${draggable}" data-id="${s.id}"
+                ondragstart="chainDragStart(event)" ondragover="chainDragOver(event)"
+                ondrop="chainDrop(event)" ondragend="chainDragEnd(event)">
+      <span class="chain-toggle" onclick="toggleChainSource('${s.id}')">${enabled ? '✅' : '❌'}</span>
+      <span class="chain-pos">${i + 1}.</span>
+      <span>${s.icon}</span>
+      <span class="chain-label">${s.label}</span>
+      ${draggable ? '<span class="chain-grip">⠿</span>' : ''}
+    </li>`;
+  }).join('');
+  modal.innerHTML = `
+    <div class="chain-modal-content">
+      <h3>⚙️ Cadena de búsqueda — ${_chainModalCol}</h3>
+      <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px;">Arrastrá para cambiar el orden. Clic para activar/desactivar.</p>
+      <ul class="chain-list">${listHtml}</ul>
+      <div class="chain-actions">
+        <button class="btn btn-sm" onclick="closeChainModal()">Cancelar</button>
+        <button class="btn btn-sm btn-primary" onclick="saveChainConfig()">💾 Guardar</button>
+      </div>
+    </div>`;
+}
+
+function toggleChainSource(id) {
+  const src = CHAIN_SOURCES.find(s => s.id === id);
+  if (src && src.fixed) return;
+  _chainEnabled[id] = !_chainEnabled[id];
+  renderChainModal();
+}
+
+let _dragId = null;
+function chainDragStart(e) { _dragId = e.target.dataset.id; e.target.classList.add('dragging'); }
+function chainDragEnd(e) { e.target.classList.remove('dragging'); _dragId = null; }
+function chainDragOver(e) { e.preventDefault(); }
+function chainDrop(e) {
+  e.preventDefault();
+  const targetId = e.target.closest('[data-id]')?.dataset.id;
+  if (!targetId || !_dragId || targetId === _dragId) return;
+  const targetSrc = CHAIN_SOURCES.find(s => s.id === targetId);
+  const dragSrc = CHAIN_SOURCES.find(s => s.id === _dragId);
+  if (targetSrc?.fixed || dragSrc?.fixed) return;
+  const fromIdx = _chainOrder.indexOf(_dragId);
+  const toIdx = _chainOrder.indexOf(targetId);
+  _chainOrder.splice(fromIdx, 1);
+  _chainOrder.splice(toIdx, 0, _dragId);
+  renderChainModal();
+}
+
+async function saveChainConfig() {
+  const disabled = Object.entries(_chainEnabled).filter(([, v]) => !v).map(([k]) => k);
+  try {
+    await apiFetch(`/api/projects/collections/${_chainModalCol}/chain`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ search_chain: _chainOrder, disabled_sources: disabled }),
+    });
+    showToast('Cadena guardada', 'success');
+  } catch (e) {
+    showToast('Error al guardar cadena', 'error');
+  }
+  closeChainModal();
+}
+
+function closeChainModal() {
+  const m = document.getElementById('chainModal');
+  if (m) m.style.display = 'none';
+}
+
+document.addEventListener('click', (e) => {
+  const wrap = document.getElementById('collectionCombo');
+  if (wrap && !wrap.contains(e.target)) {
+    const dd = document.getElementById('cbDropdown');
+    if (dd) dd.style.display = 'none';
+    document.getElementById('cbTrigger')?.classList.remove('open');
+  }
+});
+
+function handleCollectionChange() { /* legacy no-op */ }
 
 const typeOptions = document.querySelectorAll('.type-option');
 typeOptions.forEach(opt => {
@@ -901,11 +1190,23 @@ async function submitNewVideo(event) {
     ? JSON.stringify(completedRefs.map(v => ({ url: v.url, title: v.title, transcript: v.transcript })))
     : null;
 
+  // Resolve collection value (stock mode only)
+  let collection = 'general';
+  if (mode === 'stock') {
+    if (_selectedCollection === '__new__') {
+      const name = (document.getElementById('collectionName').value || '').trim();
+      collection = name || 'general';
+    } else {
+      collection = _selectedCollection || 'general';
+    }
+  }
+
   const payload = {
     title: document.getElementById('title').value.trim(),
     mode,
     video_type,
     duration,
+    collection,
     reference_character: mode === 'animated' ? document.getElementById('referenceCharacter').value.trim() || null : null,
     reference_transcripts,
   };
@@ -919,6 +1220,11 @@ async function submitNewVideo(event) {
 
     showToast(`Video "${project.title}" creado y en cola`, 'success');
     document.getElementById('newVideoForm').reset();
+    document.getElementById('collectionGroup').style.display = 'none';
+    document.getElementById('newCollectionInput').style.display = 'none';
+    _selectedCollection = 'general';
+    const cbVal = document.getElementById('cbValue');
+    if (cbVal) cbVal.textContent = '📦 general';
     modeOptions[0].click(); // reset to animated
     typeOptions[0].click(); // reset to top10
     durOptions[0].click();  // reset to 6-8 min
@@ -2370,6 +2676,24 @@ async function continueWithVideo() {
   showToast('Próximamente — integración con NCA para renderizado de video.', 'info');
 }
 
+async function searchStockAssets() {
+  if (!currentProjectId) return;
+  const btn = document.getElementById('btnSearchStockAssets');
+  const origText = btn ? btn.textContent : '🔍 Buscar Assets de Stock';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Buscando assets…'; }
+
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/search-stock-assets`, { method: 'POST' });
+    showToast('🔍 Búsqueda de assets iniciada — revisa los logs.', 'info');
+    stopPolling();
+    await refreshDetail(currentProjectId);
+    pollInterval = setInterval(() => refreshDetail(currentProjectId), 3000);
+  } catch (e) {
+    showToast('Error al buscar assets: ' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = origText; }
+  }
+}
+
 async function startVeo3Animation() {
   if (!currentProjectId) return;
   const btn = document.getElementById('startVeo3AnimationBtn');
@@ -2522,7 +2846,7 @@ async function refreshEditing(projectId) {
       const logsCard2 = document.getElementById('editingLogsCard');
       if (logsCard2) logsCard2.style.display = 'none';
       if (cancelBtn) cancelBtn.remove();
-      renderBtn.textContent = '🔄 Re-renderizar';
+      renderBtn.textContent = '🎬 Renderizar Video';
       renderBtn.disabled = false;
       renderBtn.style.display = '';
       renderHint.textContent = '✅ Listo';
@@ -2531,9 +2855,11 @@ async function refreshEditing(projectId) {
         finalPreview.style.display = '';
         const player = document.getElementById('editingVideoPlayer');
         const dl = document.getElementById('editingVideoDownload');
+        const headerDl = document.getElementById('editingHeaderDownload');
         const videoUrl = `/api/projects/${p.id}/final-video?t=${Date.now()}`;
         if (player) player.src = videoUrl;
         if (dl) dl.href = videoUrl;
+        if (headerDl) { headerDl.href = videoUrl; headerDl.download = 'final_video.mp4'; headerDl.style.display = ''; }
         // Also show in main preview
         const mainPlayer = document.getElementById('editingPreviewPlayer');
         const placeholder = document.getElementById('editingPreviewPlaceholder');
@@ -2548,7 +2874,7 @@ async function refreshEditing(projectId) {
       if (cancelBtn) cancelBtn.remove();
       renderBtn.style.display = '';
       renderBtn.disabled = false;
-      renderBtn.textContent = '🎬 Renderizar Video Final';
+      renderBtn.textContent = '🎬 Renderizar Video';
       renderHint.textContent = `${doneVids} clips · ${totalDurStr}`;
       if (progressDiv) progressDiv.style.display = 'none';
       if (finalPreview) finalPreview.style.display = 'none';
@@ -2935,6 +3261,25 @@ function _initCanvasPlayer(projectId, chunks) {
   _canvasPlayer.onTimeUpdate = (currentMs, totalMs) => {
     const el = document.getElementById('playerTimeDisplay');
     if (el) el.textContent = `${_fmtDuration(currentMs)} / ${_fmtDuration(totalMs)}`;
+
+    // Update scrubber bar
+    const pct = totalMs > 0 ? Math.min(currentMs / totalMs, 1) : 0;
+    const fill = document.getElementById('timelineScrubberFill');
+    const head = document.getElementById('timelinePlayhead');
+    const timeEl = document.getElementById('timelineScrubberTime');
+    if (fill) fill.style.width = (pct * 100) + '%';
+    if (head) head.style.left = (pct * 100) + '%';
+    if (timeEl) timeEl.textContent = _fmtDuration(currentMs);
+
+    // Move vertical playhead line over clips
+    const clipHead = document.getElementById('timelineClipPlayhead');
+    const clipTrack = document.querySelector('.timeline-track-clips');
+    if (clipHead && clipTrack && totalMs > 0) {
+      const trackW = clipTrack.scrollWidth;
+      const offsetPx = Math.round(pct * trackW);
+      clipHead.style.display = '';
+      clipHead.style.left = (70 + offsetPx) + 'px';
+    }
   };
 
   _canvasPlayer.onChunkChange = (idx) => {
@@ -2950,6 +3295,16 @@ function _initCanvasPlayer(projectId, chunks) {
 function _showPlayerControls() {
   const controls = document.getElementById('editingPlayerControls');
   if (controls) controls.style.display = '';
+}
+
+function timelineScrubberSeek(event) {
+  if (!_canvasPlayer) return;
+  const bar = document.getElementById('timelineScrubber');
+  if (!bar) return;
+  const rect = bar.getBoundingClientRect();
+  const pct = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+  const totalMs = _canvasPlayer.totalDurMs || 0;
+  if (totalMs > 0) _canvasPlayer.seekTo(pct * totalMs);
 }
 
 function toggleCanvasPlay() {
@@ -3035,7 +3390,7 @@ async function _saveClipOrder() {
 async function renderFinalVideo() {
   if (!currentProjectId) return;
   const btn = document.getElementById('editingRenderBtn');
-  const origText = btn ? btn.textContent : '🎬 Renderizar Video Final';
+  const origText = btn ? btn.textContent : '🎬 Renderizar Video';
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Iniciando render…'; }
 
   try {

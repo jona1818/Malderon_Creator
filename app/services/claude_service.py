@@ -3,10 +3,20 @@ Uses OpenRouter (openai-compatible) instead of Anthropic directly.
 """
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 from openai import OpenAI
 from ..config import settings
+
+
+def _safe_print(msg: str) -> None:
+    """Print that won't crash on Windows when stdout is invalid/piped."""
+    try:
+        sys.stdout.buffer.write((msg + "\n").encode("utf-8", errors="replace"))
+        sys.stdout.buffer.flush()
+    except Exception:
+        pass
 
 # OpenRouter is OpenAI-compatible — just swap the base_url and api_key
 client = OpenAI(
@@ -335,58 +345,17 @@ def generate_script_from_outline(outline: str, duration: str = "6-8") -> str:
 
 # ── Scene division with SRT timestamps ───────────────────────────────────────
 
-def divide_script_into_scenes(_script_text: str, srt_content: str) -> list:
-    """Divide a script into scenes using Claude + SRT timestamps.
-
-    For long videos, the SRT is split into ~60s blocks and each block is
-    processed independently. Results are merged and renumbered.
-
-    Returns list of dicts: [{"id": 1, "texto": "...", "startMs": 0, "endMs": 6500}, ...]
-    """
-    import sys as _sys
-
-    srt_breakpoints = _parse_srt_breakpoints(srt_content)
-    srt_blocks = _split_srt_into_blocks(srt_content, block_duration_ms=60000)
-
-    print(f"[SceneDivision] {len(srt_blocks)} bloques de ~60s para procesar.")
-
-    all_scenes: list = []
-
-    for block_idx, (block_srt, block_start_ms, block_end_ms) in enumerate(srt_blocks):
-        print(f"[SceneDivision] Bloque {block_idx + 1}/{len(srt_blocks)}: "
-              f"{block_start_ms / 1000:.1f}s - {block_end_ms / 1000:.1f}s")
-
-        block_scenes = _divide_srt_block(block_srt, block_start_ms, srt_breakpoints)
-        all_scenes.extend(block_scenes)
-
-    # Renumber IDs sequentially across all blocks
-    for idx, s in enumerate(all_scenes, 1):
-        s["id"] = idx
-
-    if not all_scenes:
-        raise RuntimeError("No se generaron escenas.")
-
-    print(f"[SceneDivision] Total: {len(all_scenes)} escenas.")
-    return all_scenes
+_MODEL_HAIKU = "anthropic/claude-haiku-4.5"
+_SCENE_CHUNK_WORDS = 3000  # split script into chunks of this many words for long videos
 
 
 def _split_srt_into_blocks(srt_content: str, block_duration_ms: int = 60000) -> list:
     """Split SRT content into blocks of ~block_duration_ms each.
 
-    Always cuts at SRT entry boundaries (never mid-entry).
-    Returns list of (block_srt_text, block_start_ms, block_end_ms).
+    Always cuts at SRT entry boundaries. Returns list of (block_srt_text, start_ms, end_ms).
     """
-    # Parse all SRT entries: (start_ms, end_ms, text)
-    entry_pattern = re.compile(
-        r"\d+\s*\n"
-        r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*"
-        r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*\n"
-        r"((?:.+\n?)+)",
-        re.MULTILINE
-    )
-
     def ts_to_ms(h, m, s, ms):
-        return int(h) * 3600000 + int(m) * 60000 + int(s) * 1000 + int(ms)
+        return int(h)*3600000 + int(m)*60000 + int(s)*1000 + int(ms)
 
     def ms_to_srt(ms):
         h = ms // 3600000; ms %= 3600000
@@ -394,416 +363,468 @@ def _split_srt_into_blocks(srt_content: str, block_duration_ms: int = 60000) -> 
         s = ms // 1000;    ms %= 1000
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
-    entries = []
-    for match in entry_pattern.finditer(srt_content):
-        start = ts_to_ms(match.group(1), match.group(2), match.group(3), match.group(4))
-        end   = ts_to_ms(match.group(5), match.group(6), match.group(7), match.group(8))
-        text  = match.group(9).strip()
-        entries.append((start, end, text))
-
-    if not entries:
-        return [(srt_content, 0, 0)]
-
-    # Group entries into blocks
-    blocks = []
-    current_entries = []
-    block_start = entries[0][0]
-
-    for i, entry in enumerate(entries):
-        current_entries.append(entry)
-        block_duration = entry[1] - block_start
-        if block_duration >= block_duration_ms:
-            blocks.append((current_entries[:], block_start, entry[1]))
-            current_entries = []
-            if i + 1 < len(entries):
-                block_start = entries[i + 1][0]
-
-    # Last block (remaining entries)
-    if current_entries:
-        blocks.append((current_entries, block_start, current_entries[-1][1]))
-
-    # Convert each block back to SRT text
-    result = []
-    for block_entries, blk_start, blk_end in blocks:
-        srt_lines = []
-        for i, (start, end, text) in enumerate(block_entries, 1):
-            srt_lines.append(f"{i}\n{ms_to_srt(start)} --> {ms_to_srt(end)}\n{text}\n")
-        result.append(("\n".join(srt_lines), blk_start, blk_end))
-
-    return result
-
-
-def _parse_srt_entries(block_srt: str) -> list:
-    """Parse SRT text into list of dicts: [{idx, start, end, text}, ...]."""
     pattern = re.compile(
-        r"(\d+)\s*\n"
+        r"\d+\s*\n"
         r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*"
         r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*\n"
         r"((?:.+\n?)+)",
         re.MULTILINE
     )
     entries = []
-    for m in pattern.finditer(block_srt):
+    for m in pattern.finditer(srt_content):
+        start = ts_to_ms(m.group(1), m.group(2), m.group(3), m.group(4))
+        end   = ts_to_ms(m.group(5), m.group(6), m.group(7), m.group(8))
+        entries.append((start, end, m.group(9).strip()))
+
+    if not entries:
+        return [(srt_content, 0, 0)]
+
+    blocks = []
+    current = []
+    block_start = entries[0][0]
+    for i, entry in enumerate(entries):
+        current.append(entry)
+        if entry[1] - block_start >= block_duration_ms:
+            blocks.append((current[:], block_start, entry[1]))
+            current = []
+            if i + 1 < len(entries):
+                block_start = entries[i + 1][0]
+    if current:
+        blocks.append((current, block_start, current[-1][1]))
+
+    result = []
+    for block_entries, blk_start, blk_end in blocks:
+        srt_lines = [
+            f"{i}\n{ms_to_srt(s)} --> {ms_to_srt(e)}\n{t}\n"
+            for i, (s, e, t) in enumerate(block_entries, 1)
+        ]
+        result.append(("\n".join(srt_lines), blk_start, blk_end))
+    return result
+
+
+def divide_script_into_scenes(_script_text: str, srt_content: str, mode: str = "animated") -> list:
+    """Divide a script into scenes using Claude Haiku + word-level SRT timestamps.
+
+    Approach:
+      1. Parse SRT → build word-level timestamps (interpolate within each entry)
+      2. Extract full continuous text from SRT
+      3. For long videos (>_SCENE_CHUNK_WORDS), split into ~60s SRT blocks and
+         process each block independently; otherwise process all at once
+      4. Send text to Haiku → get list of scene text strings
+      5. Post-process: merge short scenes (<3s) + split long scenes (>7s)
+      6. Map scene texts back to word-level timestamps
+
+    Returns list of dicts: [{"id": 1, "texto": "...", "startMs": 0, "endMs": 6500}, ...]
+    """
+    entries = _parse_srt_entries_full(srt_content)
+    if not entries:
+        raise RuntimeError("No SRT entries found.")
+
+    word_ts = _build_word_timestamps(entries)
+    full_text = " ".join(e["text"] for e in entries)
+    total_duration_ms = entries[-1]["end"]
+    total_duration_s = total_duration_ms / 1000
+    total_words = len(full_text.split())
+    wps = total_words / total_duration_s if total_duration_s > 0 else 2.5
+
+    _safe_print(f"[SceneDivision] mode={mode}, {total_words} palabras, {total_duration_s:.1f}s, {wps:.1f} wps")
+
+    if total_words <= _SCENE_CHUNK_WORDS:
+        # Short video — process everything in one call
+        scene_texts = _divide_text_with_haiku(full_text, total_duration_s, wps, mode)
+        _safe_print(f"[SceneDivision] Haiku devolvió {len(scene_texts)} escenas (un solo bloque)")
+        scene_texts = _postprocess_scenes(scene_texts, wps, mode)
+        all_scenes = _map_scenes_to_timestamps(scene_texts, word_ts)
+    else:
+        # Long video — split SRT into ~60s blocks, process each, merge
+        srt_blocks = _split_srt_into_blocks(srt_content, block_duration_ms=60000)
+        _safe_print(f"[SceneDivision] {len(srt_blocks)} bloques de ~60s")
+        all_scenes = []
+
+        for block_idx, (block_srt, block_start_ms, block_end_ms) in enumerate(srt_blocks):
+            _safe_print(f"[SceneDivision] Bloque {block_idx + 1}/{len(srt_blocks)}: "
+                        f"{block_start_ms / 1000:.1f}s - {block_end_ms / 1000:.1f}s")
+
+            block_entries = _parse_srt_entries_full(block_srt)
+            if not block_entries:
+                continue
+
+            block_word_ts = _build_word_timestamps(block_entries)
+            block_text = " ".join(e["text"] for e in block_entries)
+            block_dur_s = (block_end_ms - block_start_ms) / 1000
+            block_words = len(block_text.split())
+            block_wps = block_words / block_dur_s if block_dur_s > 0 else wps
+
+            block_scene_texts = _divide_text_with_haiku(block_text, block_dur_s, block_wps, mode)
+            block_scene_texts = _postprocess_scenes(block_scene_texts, block_wps, mode)
+            block_scenes = _map_scenes_to_timestamps(block_scene_texts, block_word_ts)
+            all_scenes.extend(block_scenes)
+
+    # Renumber IDs sequentially
+    for idx, s in enumerate(all_scenes, 1):
+        s["id"] = idx
+
+    if not all_scenes:
+        raise RuntimeError("No se generaron escenas.")
+
+    _safe_print(f"[SceneDivision] Total: {len(all_scenes)} escenas.")
+    return all_scenes
+
+
+def _parse_srt_entries_full(srt_text: str) -> list:
+    """Parse SRT text into list of dicts: [{idx, start, end, text}, ...]."""
+    pattern = re.compile(
+        r"(\d+)\s*\n"
+        r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*"
+        r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*\n"
+        r"((?:.+\n?)+)",
+        re.MULTILINE,
+    )
+    entries = []
+    for m in pattern.finditer(srt_text):
         start = int(m.group(2))*3600000 + int(m.group(3))*60000 + int(m.group(4))*1000 + int(m.group(5))
         end   = int(m.group(6))*3600000 + int(m.group(7))*60000 + int(m.group(8))*1000 + int(m.group(9))
         entries.append({"idx": int(m.group(1)), "start": start, "end": end, "text": m.group(10).strip()})
     return entries
 
 
-def _divide_srt_block(block_srt: str, block_start_ms: int, srt_breakpoints: list) -> list:
-    """Divide one ~60s SRT block into scenes using AI for grouping.
+def _build_word_timestamps(entries: list) -> list:
+    """Build word-level timestamps by distributing time evenly across words in each SRT entry.
 
-    Key insight: we DON'T ask the AI for timestamps. Instead we ask it to
-    group SRT entries by number, then derive timestamps from the real SRT data.
-    This avoids timestamp format issues across different AI models.
+    Returns: [{"word": "Hola", "start_ms": 0, "end_ms": 250}, ...]
     """
-    import time as _time
-
-    entries = _parse_srt_entries(block_srt)
-    if not entries:
-        return []
-
-    FIRST_MINUTE_MS = 60000
-    is_zone1 = block_start_ms < FIRST_MINUTE_MS
-    target = "2-4 seconds (fast cuts)" if is_zone1 else "5-8 seconds"
-
-    # Build numbered list with durations for the AI
-    entry_descs = []
+    words = []
     for e in entries:
-        dur = (e["end"] - e["start"]) / 1000
-        entry_descs.append(f"Entry {e['idx']}: ({dur:.1f}s) \"{e['text']}\"")
+        entry_words = e["text"].split()
+        if not entry_words:
+            continue
+        duration = e["end"] - e["start"]
+        per_word = duration / len(entry_words)
+        for i, w in enumerate(entry_words):
+            words.append({
+                "word": w,
+                "start_ms": e["start"] + int(i * per_word),
+                "end_ms": e["start"] + int((i + 1) * per_word),
+            })
+    return words
+
+
+def _divide_text_with_haiku(full_text: str, total_duration_s: float, wps: float,
+                            mode: str = "animated") -> list:
+    """Send continuous narration text to Claude Haiku. Returns list of scene text strings."""
+    total_words = len(full_text.split())
+    print(f"[_divide_text_with_haiku] mode={mode}, words={total_words}, dur={total_duration_s:.1f}s")
+    print(f"[_divide_text_with_haiku] STOCK PROMPT: {'YES' if mode == 'stock' else 'NO (animated)'}")
 
     system_prompt = (
-        "You group subtitle entries into video scenes for AI image generation. "
-        "Each scene = one visual shot. Return ONLY a valid JSON array of [first, last] entry ranges. "
-        "No markdown fences, no explanation."
+        "Eres un editor de video profesional. Dividís texto narrado en escenas visuales. "
+        "Devolvé SOLO un JSON array de strings con el texto de cada escena. "
+        "Sin markdown, sin explicación, sin texto extra."
     )
 
-    user_prompt = (
-        f"Group these {len(entries)} subtitle entries into scenes of {target} each.\n\n"
-        + "\n".join(entry_descs) +
-        "\n\nRules:\n"
-        f"- Target duration per scene: {target}.\n"
-        "- HARD MAXIMUM: 8 seconds per scene. Never exceed this.\n"
-        "- Each scene must represent ONE clear visual idea (for AI image generation).\n"
-        "- Group consecutive entries only.\n"
-        "- Every entry must be in exactly one scene.\n"
-        "- Prefer splitting at sentence boundaries (after periods).\n"
-        "- If a single entry exceeds 8s, it must be its own scene.\n\n"
-        "Return ONLY JSON like: [[1,2], [3,3], [4,5]]"
+    if mode == "stock":
+        user_prompt = (
+            f"Dividí este texto en escenas visuales para un video.\n\n"
+            f"TEXTO COMPLETO:\n{full_text}\n\n"
+            f"DURACIÓN TOTAL: {total_duration_s:.1f}s\n"
+            f"TOTAL PALABRAS: {total_words}\n"
+            f"VELOCIDAD: {wps:.1f} palabras por segundo\n\n"
+            "Cada escena debe ser UNA idea visual que pueda representarse con una sola imagen o video.\n\n"
+            "=== REGLAS ===\n"
+            "1. Cada escena debe tener sentido completo por sí sola como imagen visual.\n"
+            "2. Cortá en comas, puntos, punto y coma, o cualquier pausa natural donde cambie la imagen mental.\n"
+            "3. NUNCA cortes a mitad de una idea. Si decís 'we're talking about' la siguiente parte "
+            "DEBE estar en la misma escena o la escena no tiene sentido visual.\n"
+            "4. NUNCA termines una escena en preposición (about, of, to, for, in, on, with) o "
+            "conjunción (and, or, that, which) sin completar la idea.\n"
+            "5. Cada escena debe poder responderse: ¿qué imagen pondrías aquí? "
+            "Si no podés imaginar una imagen clara para la escena, está mal cortada.\n"
+            "6. Duración ideal: 2-6 segundos por escena. Máximo absoluto: 10 segundos.\n"
+            f"   (A {wps:.1f} palabras/segundo, 2s = ~{int(2 * wps)} palabras, 6s = ~{int(6 * wps)} palabras)\n"
+            "7. No hay mínimo estricto de palabras. Una escena de 3 palabras es válida si tiene "
+            "sentido visual completo.\n\n"
+            "=== EJEMPLO ===\n"
+            "Texto: \"Phoenix, Arizona, a desert city, is experiencing an economic transformation "
+            "unlike anything seen in the US in decades. We're not just talking about a few new "
+            "buildings; we're talking about a $200 billion boom driven by semiconductor factories, "
+            "data centers, and urban revitalization.\"\n\n"
+            "BIEN dividido:\n"
+            "[\n"
+            '  "Phoenix, Arizona, a desert city,",\n'
+            '  "is experiencing an economic transformation unlike anything seen in the US in decades.",\n'
+            '  "We\'re not just talking about a few new buildings;",\n'
+            '  "we\'re talking about a $200 billion boom",\n'
+            '  "driven by semiconductor factories, data centers, and urban revitalization."\n'
+            "]\n\n"
+            "MAL dividido:\n"
+            '- "is experiencing an economic" ← cortado a mitad de idea, no hay imagen posible\n'
+            '- "a $200 billion boom driven by semiconductor factories, data centers, and urban '
+            'revitalization. This could make Phoenix the most important" ← dos ideas distintas mezcladas\n'
+            '- "or a cautionary tale of" ← preposición colgando sin completar la idea\n\n'
+            "=== OUTPUT ===\n"
+            "Devolvé SOLO el JSON array de strings. "
+            "Todo el texto original debe estar presente, sin omitir ni repetir nada.\n"
+            '[\"texto escena 1\", \"texto escena 2\", ...]'
+        )
+    else:
+        # Animated mode — original prompt
+        target_min, target_max, abs_max = 3, 5, 6
+        user_prompt = (
+            f"Dividí este texto narrado en escenas visuales para un video.\n\n"
+            f"TEXTO COMPLETO:\n{full_text}\n\n"
+            f"DURACIÓN TOTAL: {total_duration_s:.1f}s\n"
+            f"TOTAL PALABRAS: {total_words}\n"
+            f"VELOCIDAD: {wps:.1f} palabras por segundo\n\n"
+            "=== REGLAS ===\n"
+            f"1. Cada escena debe durar entre {target_min} y {target_max} segundos.\n"
+            f"   (A {wps:.1f} palabras/segundo, eso es ~{int(target_min * wps)}-{int(target_max * wps)} palabras por escena)\n"
+            f"2. MÁXIMO ABSOLUTO: {abs_max} segundos. NUNCA superar {abs_max} segundos por escena.\n"
+            "3. Calculá la duración estimada de cada escena contando sus palabras y dividiéndolas por la velocidad.\n"
+            "4. NUNCA cortes a mitad de frase o palabra.\n"
+            "5. Cortá preferentemente en puntos (.), signos de exclamación (!) o signos de interrogación (?).\n"
+            f"6. Si una oración dura más de {target_max} segundos, DEBÉS dividirla en un punto medio natural como una coma "
+            "entre cláusulas. En ese caso la coma SÍ es un punto de corte válido. "
+            f"La regla de no cortar en comas aplica solo para oraciones que caben en {target_max} segundos.\n"
+            "7. NUNCA dejes una escena con menos de 4 palabras.\n"
+            f"8. Si dos frases cortas consecutivas duran menos de {target_min} segundos cada una, agrupalas en una sola escena.\n"
+            "9. Cada escena debe representar UNA idea visual completa.\n\n"
+            "=== EJEMPLO ===\n"
+            "Texto: \"Objetos que estuvieron en contacto directo con el cuerpo de Cristo "
+            "aún existen hoy, custodiados en catedrales, bóvedas seguras y museos "
+            "de todo el mundo. No son solo leyendas o cuentos medievales, sino "
+            "reliquias físicas con siglos de historia documentada, analizadas por "
+            "científicos modernos y veneradas por millones de peregrinos.\"\n\n"
+            "BIEN dividido:\n"
+            "[\n"
+            "  \"Objetos que estuvieron en contacto directo con el cuerpo de Cristo aún existen hoy,\",\n"
+            "  \"custodiados en catedrales, bóvedas seguras y museos de todo el mundo.\",\n"
+            "  \"No son solo leyendas o cuentos medievales,\",\n"
+            "  \"sino reliquias físicas con siglos de historia documentada,\",\n"
+            "  \"analizadas por científicos modernos y veneradas por millones de peregrinos.\"\n"
+            "]\n\n"
+            "MAL dividido:\n"
+            "- Una oración de 8 palabras en una sola escena cuando podría dividirse en coma\n"
+            "- Repetir texto entre escenas\n"
+            "- Cortar a mitad de frase sin puntuación\n\n"
+            "=== OUTPUT ===\n"
+            "Devolvé SOLO el JSON array de strings. "
+            "Todo el texto original debe estar presente, sin omitir ni repetir nada.\n"
+            "[\"texto escena 1\", \"texto escena 2\", ...]"
+        )
+
+    # Debug: confirm which prompt is being sent
+    _has_visual_rules = "NUNCA termines una escena en preposición" in user_prompt
+    print(f"[_divide_text_with_haiku] Prompt has visual-coherence rules: {_has_visual_rules}")
+    print(f"[_divide_text_with_haiku] Prompt first 300 chars: {user_prompt[:300]}")
+
+    resp = client.chat.completions.create(
+        model=_MODEL_HAIKU,
+        max_tokens=16000,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
     )
-
-    MAX_ATTEMPTS = 2
-    last_scenes = None
-    messages = [{"role": "user", "content": user_prompt}]
-
-    for attempt in range(MAX_ATTEMPTS):
-        raw = ""
-        try:
-            resp = client.chat.completions.create(
-                model=_MODEL_FAST,
-                max_tokens=1024,
-                messages=[{"role": "system", "content": system_prompt}] + messages,
-            )
-            raw = resp.choices[0].message.content.strip()
-            raw_clean = re.sub(r"^```(?:json)?\s*", "", raw)
-            raw_clean = re.sub(r"\s*```$", "", raw_clean)
-            ranges = json.loads(raw_clean)
-
-            if not isinstance(ranges, list):
-                raise ValueError(f"Expected JSON array, got {type(ranges).__name__}")
-
-            # Build scenes from entry ranges
-            scenes = []
-            for r in ranges:
-                if isinstance(r, list) and len(r) >= 2:
-                    first, last = int(r[0]), int(r[1])
-                elif isinstance(r, dict):
-                    first = int(r.get("first") or r.get("start") or r.get("from", 0))
-                    last = int(r.get("last") or r.get("end") or r.get("to", 0))
-                else:
-                    continue
-
-                scene_entries = [e for e in entries if first <= e["idx"] <= last]
-                if not scene_entries:
-                    continue
-
-                scenes.append({
-                    "id": len(scenes) + 1,
-                    "texto": " ".join(e["text"] for e in scene_entries),
-                    "startMs": scene_entries[0]["start"],
-                    "endMs": scene_entries[-1]["end"],
-                })
-
-            if not scenes:
-                raise ValueError("No valid scenes produced from ranges")
-
-            last_scenes = scenes
-            _validate_scenes(scenes)
-            return scenes
-
-        except Exception as exc:
-            print(f"[SceneDivision] Block {block_start_ms}ms attempt {attempt+1}/{MAX_ATTEMPTS} error: {exc}")
-            if attempt < MAX_ATTEMPTS - 1:
-                messages = [
-                    {"role": "user", "content": user_prompt},
-                    {"role": "assistant", "content": raw},
-                    {"role": "user", "content": f"ERROR: {exc}\nFix and return corrected JSON ranges."},
-                ]
-                _time.sleep(1)
-
-    # Fallback 1: accept partial result if scenes respect 8s limit
-    MAX_FALLBACK_MS = 8500
-    if last_scenes:
-        valid = [s for s in last_scenes
-                 if s["endMs"] > s["startMs"] and (s["endMs"] - s["startMs"]) <= MAX_FALLBACK_MS]
-        if len(valid) >= len(last_scenes) * 0.7:  # at least 70% pass
-            print(f"[WARNING] Block {block_start_ms}ms: using partial result ({len(valid)} scenes).")
-            return valid
-
-    # Fallback 2: group entries greedily up to 8s — always has real text
-    MAX_SCENE_FALLBACK = 8000
-    print(f"[WARNING] Block {block_start_ms}ms: using programmatic grouping (max {MAX_SCENE_FALLBACK}ms).")
-    scenes = []
-    i = 0
-    while i < len(entries):
-        grp = [entries[i]]
-        j = i + 1
-        while j < len(entries):
-            combined_dur = entries[j]["end"] - grp[0]["start"]
-            if combined_dur > MAX_SCENE_FALLBACK:
-                break
-            grp.append(entries[j])
-            j += 1
-        scenes.append({
-            "id": len(scenes) + 1,
-            "texto": " ".join(e["text"] for e in grp),
-            "startMs": grp[0]["start"],
-            "endMs": grp[-1]["end"],
-        })
-        i = j
-    return scenes
-
-
-def _ts_str_to_ms(ts: str) -> int:
-    """Convert timestamp string '00:01:23,456' or '00:01:23.456' to milliseconds."""
-    if not ts:
-        return 0
-    ts = ts.strip().replace(",", ".")
-    parts = ts.split(":")
-    try:
-        if len(parts) == 3:
-            h, m, s = parts
-            return int(h) * 3600000 + int(m) * 60000 + round(float(s) * 1000)
-        if len(parts) == 2:
-            m, s = parts
-            return int(m) * 60000 + round(float(s) * 1000)
-    except (ValueError, TypeError):
-        pass
-    return 0
-
-
-def _normalize_scene(scene: dict, idx: int) -> dict:
-    """Normalize any AI response format to {id, texto, startMs, endMs}."""
-    # id
-    scene_id = scene.get("id") or idx + 1
-    # text — accept varios nombres de campo
-    texto = (scene.get("texto") or scene.get("text") or scene.get("narration")
-             or scene.get("content") or scene.get("script") or "")
-    # startMs — acepta entero o string timestamp
-    start_ms = scene.get("startMs") or scene.get("start_ms")
-    if start_ms is None:
-        start_ms = _ts_str_to_ms(scene.get("start") or scene.get("startTime") or "")
-    # endMs
-    end_ms = scene.get("endMs") or scene.get("end_ms")
-    if end_ms is None:
-        end_ms = _ts_str_to_ms(scene.get("end") or scene.get("endTime") or "")
-    return {"id": int(scene_id), "texto": str(texto), "startMs": int(start_ms), "endMs": int(end_ms)}
-
-
-def _parse_scenes_json(raw: str) -> list:
-    """Parse AI JSON response, normalize to expected format regardless of field names."""
-    raw = raw.strip()
+    raw = resp.choices[0].message.content.strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
     raw = re.sub(r"\s*```$", "", raw)
     scenes = json.loads(raw)
-    if not isinstance(scenes, list):
-        raise ValueError(f"Expected JSON array, got {type(scenes).__name__}")
-    return [_normalize_scene(s, i) for i, s in enumerate(scenes)]
+
+    if not isinstance(scenes, list) or not all(isinstance(s, str) for s in scenes):
+        raise ValueError(f"Expected JSON array of strings, got: {type(scenes)}")
+
+    return scenes
 
 
-def _parse_srt_breakpoints(srt_content: str) -> list:
-    """Extract all unique timestamp breakpoints (in ms) from an SRT file."""
-    pattern = re.compile(r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})")
-    breakpoints = set()
-    for m in pattern.finditer(srt_content):
-        h, mi, s, ms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-        breakpoints.add(h * 3600000 + mi * 60000 + s * 1000 + ms)
-    return sorted(breakpoints)
+def _postprocess_scenes(scene_texts: list, wps: float, mode: str = "animated") -> list:
+    """Post-process scene texts: merge short, split long, validate.
 
-
-def _force_split_oversized(scenes: list, srt_breakpoints: list, max_ms: int = 10000) -> list:
-    """Programmatically split any scene exceeding max_ms at the nearest SRT breakpoint.
-
-    This is a safety net: if Claude returns scenes > max_ms, we force-split them
-    using real SRT timestamps so the result respects the limit.
-    Text is split proportionally by time position.
+    Runs merge→split→merge cycles until all scenes are 4+ words and within max duration.
     """
-    result = []
-    for scene in scenes:
-        duration = scene["endMs"] - scene["startMs"]
-        if duration <= max_ms:
-            result.append(scene)
-            continue
+    MAX_DUR = 10.0 if mode == "stock" else 6.0
+    min_words = 4
 
-        # Find SRT breakpoints within this scene
-        start, end = scene["startMs"], scene["endMs"]
-        candidates = [bp for bp in srt_breakpoints if start < bp < end]
+    scenes = list(scene_texts)
 
-        if not candidates:
-            # No SRT breakpoint inside — force split at midpoint
-            mid = start + duration // 2
-            candidates = [mid]
+    # Run up to 10 full cycles of merge+split until everything is clean
+    for _cycle in range(10):
+        # ── MERGE: absorb any scene with <4 words into its neighbor ──────
+        scenes = _merge_short_scenes(scenes, min_words)
 
-        # Greedily split: take the largest chunk ≤ max_ms from the left
-        words = scene["texto"].split()
-        total_words = len(words)
-        boundaries = [start] + candidates + [end]
-        sub_scenes = []
-        seg_start = start
-        seg_word_start = 0
+        # ── SPLIT: break any scene >6s ───────────────────────────────────
+        scenes = _split_long_scenes(scenes, wps, MAX_DUR, min_words)
 
-        i = 1
-        while i < len(boundaries):
-            seg_end = boundaries[i]
-            seg_dur = seg_end - seg_start
+        # ── CHECK: are we done? ──────────────────────────────────────────
+        has_short = any(len(t.split()) < min_words for t in scenes)
+        has_long = any(len(t.split()) / wps > MAX_DUR for t in scenes)
 
-            # If this segment is within limit, try extending to next boundary
-            if seg_dur <= max_ms and i + 1 < len(boundaries):
-                next_dur = boundaries[i + 1] - seg_start
-                if next_dur <= max_ms:
+        if not has_short and not has_long:
+            break
+
+        # If only long scenes remain that can't be split, stop
+        if not has_short and has_long:
+            # One more attempt with brute-force splits
+            scenes = _force_split_long_scenes(scenes, wps, MAX_DUR, min_words)
+            scenes = _merge_short_scenes(scenes, min_words)
+            break
+
+    # Final safety log
+    for i, t in enumerate(scenes):
+        wc = len(t.split())
+        dur = wc / wps
+        if wc < min_words:
+            _safe_print(f"[WARNING] Scene {i+1}: {wc} words (< {min_words}): {t[:60]}")
+        if dur > MAX_DUR:
+            _safe_print(f"[WARNING] Scene {i+1}: {dur:.1f}s (> {MAX_DUR}s): {t[:60]}")
+
+    return scenes
+
+
+def _merge_short_scenes(scenes: list, min_words: int) -> list:
+    """Merge any scene with fewer than min_words into its neighbor.
+    Repeats until no short scenes remain."""
+    for _pass in range(10):
+        result = []
+        changed = False
+        i = 0
+        while i < len(scenes):
+            text = scenes[i]
+            wc = len(text.split())
+            if wc < min_words and len(scenes) > 1:
+                changed = True
+                if i + 1 < len(scenes):
+                    # Merge into next
+                    scenes[i + 1] = text.rstrip() + " " + scenes[i + 1].lstrip()
                     i += 1
                     continue
-
-            # Commit this segment
-            # Proportional word allocation
-            time_fraction = (seg_end - seg_start) / max(duration, 1)
-            word_count = max(1, round(time_fraction * total_words))
-            seg_word_end = min(seg_word_start + word_count, total_words)
-
-            # Ensure last segment gets remaining words
-            if i == len(boundaries) - 1 or seg_word_end >= total_words:
-                seg_word_end = total_words
-
-            seg_text = " ".join(words[seg_word_start:seg_word_end])
-            if seg_text.strip():
-                sub_scenes.append({
-                    "id": 0,  # renumbered below
-                    "texto": seg_text,
-                    "startMs": seg_start,
-                    "endMs": seg_end,
-                })
-
-            seg_word_start = seg_word_end
-            seg_start = seg_end
+                elif result:
+                    # Last scene — merge into previous
+                    result[-1] = result[-1].rstrip() + " " + text.lstrip()
+                    i += 1
+                    continue
+            result.append(text)
             i += 1
+        scenes = result
+        if not changed:
+            break
+    return scenes
 
-        # If no sub-scenes were created (edge case), keep original
-        if sub_scenes:
-            result.extend(sub_scenes)
+
+def _split_long_scenes(scenes: list, wps: float, max_dur: float, min_words: int) -> list:
+    """Split scenes exceeding max_dur at natural boundaries. Up to 5 passes."""
+    for _ in range(5):
+        result = []
+        changed = False
+        for text in scenes:
+            words = text.split()
+            if len(words) / wps <= max_dur:
+                result.append(text)
+                continue
+            parts = _try_split_scene(text, words, min_words)
+            if parts:
+                result.extend(parts)
+                changed = True
+            else:
+                result.append(text)
+        scenes = result
+        if not changed:
+            break
+    return scenes
+
+
+def _force_split_long_scenes(scenes: list, wps: float, max_dur: float, min_words: int) -> list:
+    """Brute-force split any remaining >max_dur scenes at word midpoint."""
+    result = []
+    for text in scenes:
+        words = text.split()
+        if len(words) / wps <= max_dur:
+            result.append(text)
+            continue
+        # Try smart split first
+        parts = _try_split_scene(text, words, min_words)
+        if parts:
+            result.extend(parts)
+            continue
+        # Brute force: split at word midpoint
+        mid_w = len(words) // 2
+        if mid_w >= min_words and (len(words) - mid_w) >= min_words:
+            result.append(" ".join(words[:mid_w]))
+            result.append(" ".join(words[mid_w:]))
         else:
-            result.append(scene)
-
-    # Renumber all scene IDs sequentially
-    for idx, s in enumerate(result, 1):
-        s["id"] = idx
-
+            result.append(text)
     return result
 
 
-def _validate_scenes(scenes: list) -> None:
-    """Validate the scene division JSON.
+def _try_split_scene(text: str, words: list, min_words: int = 4) -> list | None:
+    """Try to split a scene text at a natural boundary. Returns [left, right] or None."""
+    mid = len(text) // 2
 
-    Enforces:
-    - Hard max 8000ms (8s) for all scenes + 500ms tolerance for SRT rounding
-    - No negative timestamps, no empty text, consecutive timestamps
-    Scenes between 8000-8500ms are accepted with a console warning.
+    # 1. Period nearest to midpoint
+    for radius in range(len(text) // 2):
+        for pos in [mid - radius, mid + radius]:
+            if 0 <= pos < len(text) and text[pos] == '.':
+                left, right = text[:pos + 1].strip(), text[pos + 1:].strip()
+                if len(left.split()) >= min_words and len(right.split()) >= min_words:
+                    return [left, right]
+
+    # 2. Comma between 30-70%
+    lo, hi = int(len(text) * 0.30), int(len(text) * 0.70)
+    best_comma, best_dist = None, float("inf")
+    for pos in range(lo, hi):
+        if text[pos] == ',':
+            left, right = text[:pos + 1].strip(), text[pos + 1:].strip()
+            if len(left.split()) >= min_words and len(right.split()) >= min_words:
+                dist = abs(pos - mid)
+                if dist < best_dist:
+                    best_dist, best_comma = dist, pos
+    if best_comma is not None:
+        return [text[:best_comma + 1].strip(), text[best_comma + 1:].strip()]
+
+    # 3. Clause connector nearest to midpoint (30-70%)
+    CONNECTORS = {"y", "que", "pero", "porque", "donde", "cuando", "sino", "ni", "o"}
+    mid_w = len(words) // 2
+    lo_w, hi_w = int(len(words) * 0.30), int(len(words) * 0.70)
+    best_pos, best_dist = None, float("inf")
+    for wi in range(lo_w, hi_w):
+        if words[wi].lower().strip(".,;:!?") in CONNECTORS:
+            dist = abs(wi - mid_w)
+            if dist < best_dist and len(words[:wi]) >= min_words and len(words[wi:]) >= min_words:
+                best_dist, best_pos = dist, wi
+    if best_pos is not None:
+        return [" ".join(words[:best_pos]), " ".join(words[best_pos:])]
+
+    return None
+
+
+def _map_scenes_to_timestamps(scene_texts: list, word_timestamps: list) -> list:
+    """Map scene texts to timestamps by sequential word counting.
+
+    Walks through scene texts and word_timestamps in parallel, assigning
+    startMs/endMs from interpolated word positions.
     """
-    import sys as _sys
+    scenes = []
+    word_idx = 0
+    total_words = len(word_timestamps)
 
-    MAX_SCENE_MS = 8500   # 8s + 500ms tolerance for SRT rounding
-    WARN_SCENE_MS = 8000
-    MIN_HARD_MS = 500     # absolute minimum — reject below this
+    for scene_num, scene_text in enumerate(scene_texts, 1):
+        scene_words = scene_text.split()
+        if not scene_words:
+            continue
 
-    if not scenes:
-        raise ValueError("Empty scenes list")
+        start_idx = word_idx
+        end_idx = min(start_idx + len(scene_words), total_words)
 
-    required_keys = {"id", "texto", "startMs", "endMs"}
-    oversized = []
-    warnings = []
+        if start_idx >= total_words:
+            last_ts = word_timestamps[-1]["end_ms"] if word_timestamps else 0
+            scenes.append({"id": scene_num, "texto": scene_text,
+                           "startMs": last_ts, "endMs": last_ts})
+            continue
 
-    for i, scene in enumerate(scenes):
-        missing = required_keys - set(scene.keys())
-        if missing:
-            raise ValueError(f"Scene {i+1} missing keys: {missing}")
+        start_ms = word_timestamps[start_idx]["start_ms"]
+        end_ms = word_timestamps[min(end_idx - 1, total_words - 1)]["end_ms"]
 
-        if scene["startMs"] < 0 or scene["endMs"] < 0:
-            raise ValueError(f"Scene {scene['id']} has negative timestamps")
+        scenes.append({"id": scene_num, "texto": scene_text,
+                       "startMs": start_ms, "endMs": end_ms})
+        word_idx = end_idx
 
-        if scene["endMs"] <= scene["startMs"]:
-            raise ValueError(f"Scene {scene['id']} has zero or negative duration")
-
-        duration_ms = scene["endMs"] - scene["startMs"]
-
-        # Absolute hard max — reject
-        if duration_ms > MAX_SCENE_MS:
-            oversized.append(
-                f"Scene {scene['id']}: {duration_ms}ms ({duration_ms/1000:.1f}s) "
-                f"at {scene['startMs']}-{scene['endMs']}ms"
-            )
-        # Warning zone (8-10s) — accept but log warning
-        elif duration_ms > WARN_SCENE_MS:
-            warnings.append(
-                f"Scene {scene['id']}: {duration_ms}ms ({duration_ms/1000:.1f}s) [long]"
-            )
-
-        # Min duration — only reject extremely short (<500ms), warn otherwise
-        if duration_ms < MIN_HARD_MS:
-            raise ValueError(f"Scene {scene['id']} is too short ({duration_ms}ms)")
-        elif duration_ms < 2000:
-            warnings.append(
-                f"Scene {scene['id']}: {duration_ms}ms ({duration_ms/1000:.1f}s) [short]"
-            )
-
-        if not scene["texto"].strip():
-            raise ValueError(f"Scene {scene['id']} has empty text")
-
-    # Log warnings (accepted, not rejected)
-    if warnings:
-        try:
-            _sys.stdout.buffer.write(
-                f"[WARNING] {len(warnings)} scene(s) fuera de rango ideal (aceptadas): "
-                f"{', '.join(warnings)}\n".encode("utf-8", errors="replace")
-            )
-            _sys.stdout.buffer.flush()
-        except Exception:
-            pass
-
-    # Only reject scenes exceeding absolute 10s limit
-    if oversized:
-        raise ValueError(
-            f"{len(oversized)} scene(s) exceed {MAX_SCENE_MS}ms absolute limit:\n"
-            + "\n".join(oversized)
-        )
-
-    # Check sequential continuity — auto-fix small gaps (<100ms)
-    for i in range(1, len(scenes)):
-        gap = abs(scenes[i]["startMs"] - scenes[i-1]["endMs"])
-        if gap > 0 and gap < 100:
-            scenes[i]["startMs"] = scenes[i-1]["endMs"]
-        elif gap >= 100:
-            raise ValueError(
-                f"Gap of {gap}ms between scene {scenes[i-1]['id']} "
-                f"(ends {scenes[i-1]['endMs']}ms) and scene {scenes[i]['id']} "
-                f"(starts {scenes[i]['startMs']}ms)"
-            )
+    return scenes
