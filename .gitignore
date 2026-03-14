@@ -69,3 +69,6 @@ test_screenshots/
 *.code-workspace
 .vscode/
 
+
+# Remotion
+remotion/node_modules/

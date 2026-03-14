@@ -16,7 +16,7 @@ from ..database import get_db
 from ..models import Project, Chunk, ProjectStatus, AppSetting
 from ..schemas import ProjectCreate, ProjectOut, ProjectListItem, ScriptApprovalPayload, ResplitPayload, VoiceConfigPayload
 from ..config import PROJECTS_PATH, settings as app_settings
-from ..services.pipeline_service import start_pipeline, start_pipeline_phase2, start_regenerate_script, start_generate_voiceover, start_pipeline_phase3, start_create_scenes_from_srt, start_generate_images, start_stock_asset_search, start_retry_chunk_image, start_generate_motion_prompts, start_animate_scenes, start_regenerate_image_genaipro, start_regenerate_all_genaipro
+from ..services.pipeline_service import start_pipeline, start_pipeline_phase2, start_regenerate_script, start_generate_voiceover, start_pipeline_phase3, start_create_scenes_from_srt, start_generate_images, start_stock_asset_search, start_retry_chunk_image, start_generate_motion_prompts, start_animate_scenes, start_regenerate_image_genaipro, start_regenerate_all_genaipro, start_plan_scenes
 from ..services.render_service import start_render_final, render_transition_preview
 from pydantic import BaseModel
 
@@ -119,7 +119,7 @@ def list_collections(db: Session = Depends(get_db)):
     bank = app_settings.clip_bank_url
     if bank:
         try:
-            r = http_requests.get(f"{bank}/api/collections", timeout=5)
+            r = http_requests.get(f"{bank}/api/collections", timeout=(1.5, 5))
             if r.status_code == 200:
                 data = r.json()
                 # Clip bank returns list of collection objects
@@ -166,32 +166,62 @@ def create_collection(payload: dict):
         raise HTTPException(status_code=502, detail=f"Clip bank error: {e}")
 
 
+_DEFAULT_CHAIN = ["clip_bank", "youtube", "pexels", "pixabay", "internet_archive", "nara", "ai_fallback"]
+_DEFAULT_CHAIN_RESPONSE = {"search_chain": _DEFAULT_CHAIN, "disabled_sources": [], "source": "default"}
+
+
+def _chain_setting_key(col_name: str) -> str:
+    return f"chain_config_{col_name}"
+
+
 @router.get("/collections/{col_name}/chain")
-def get_collection_chain(col_name: str):
-    """Get search chain config for a collection from clip bank."""
+def get_collection_chain(col_name: str, db: Session = Depends(get_db)):
+    """Get search chain config for a collection. Tries clip bank first, falls back to local DB."""
     bank = app_settings.clip_bank_url
-    if not bank:
-        raise HTTPException(status_code=404, detail="Clip bank not configured")
-    try:
-        r = http_requests.get(f"{bank}/api/collections/{col_name}", timeout=5)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Clip bank error: {e}")
+    if bank:
+        try:
+            r = http_requests.get(f"{bank}/api/collections/{col_name}", timeout=(1.5, 5))
+            if r.status_code == 200:
+                return r.json()
+        except Exception:
+            pass  # clip bank offline — fall through to local
+
+    # Local fallback: read from AppSetting
+    row = db.query(AppSetting).filter(AppSetting.key == _chain_setting_key(col_name)).first()
+    if row and row.value:
+        try:
+            data = json.loads(row.value)
+            data["source"] = "local"
+            return data
+        except Exception:
+            pass
+
+    return _DEFAULT_CHAIN_RESPONSE
 
 
 @router.put("/collections/{col_name}/chain")
-def update_collection_chain(col_name: str, payload: dict):
-    """Update search chain config for a collection in clip bank."""
+def update_collection_chain(col_name: str, payload: dict, db: Session = Depends(get_db)):
+    """Update search chain config. Always saves locally; also syncs to clip bank if available."""
+    # Always persist locally first
+    key = _chain_setting_key(col_name)
+    row = db.query(AppSetting).filter(AppSetting.key == key).first()
+    if row:
+        row.value = json.dumps(payload)
+    else:
+        db.add(AppSetting(key=key, value=json.dumps(payload)))
+    db.commit()
+
+    # Try to sync to clip bank (best-effort)
     bank = app_settings.clip_bank_url
-    if not bank:
-        raise HTTPException(status_code=404, detail="Clip bank not configured")
-    try:
-        r = http_requests.put(f"{bank}/api/collections/{col_name}", json=payload, timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Clip bank error: {e}")
+    if bank:
+        try:
+            r = http_requests.put(f"{bank}/api/collections/{col_name}", json=payload, timeout=(1.5, 5))
+            if r.status_code == 200:
+                return {**r.json(), "source": "clip_bank"}
+        except Exception:
+            pass  # clip bank offline — local save is enough
+
+    return {**payload, "source": "local", "ok": True}
 
 
 @router.get("/{project_id}", response_model=ProjectOut)
@@ -616,7 +646,11 @@ def search_stock_assets(project_id: int, db: Session = Depends(get_db)):
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    if project.status not in (ProjectStatus.scenes_ready, ProjectStatus.images_ready, ProjectStatus.error):
+    if project.status not in (
+        ProjectStatus.scenes_ready, ProjectStatus.images_ready,
+        ProjectStatus.generating_images, ProjectStatus.done,
+        ProjectStatus.error,
+    ):
         raise HTTPException(status_code=400, detail="El proyecto no está en un estado válido para buscar assets")
 
     project.status = ProjectStatus.queued
@@ -626,6 +660,52 @@ def search_stock_assets(project_id: int, db: Session = Depends(get_db)):
 
     start_stock_asset_search(project.id)
     return project
+
+
+# ── Plan scenes (visual analysis only) ────────────────────────────────────────
+
+class PlanScenesPayload(BaseModel):
+    allowed_types: list[str] = []
+
+@router.post("/{project_id}/plan-scenes", response_model=ProjectOut)
+def plan_scenes(project_id: int, payload: PlanScenesPayload = None, db: Session = Depends(get_db)):
+    """Run visual analysis on all scenes to assign asset types (no download)."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.status not in (ProjectStatus.scenes_ready, ProjectStatus.images_ready, ProjectStatus.error):
+        raise HTTPException(status_code=400, detail="El proyecto no está en un estado válido para planificar escenas")
+
+    allowed = (payload.allowed_types if payload and payload.allowed_types else [])
+    start_plan_scenes(project.id, allowed_types=allowed)
+    db.refresh(project)
+    return project
+
+
+class AssetTypeUpdate(BaseModel):
+    asset_type: str
+    search_keywords: str = ""
+
+
+@router.put("/{project_id}/chunk/{chunk_number}/asset-type")
+def update_chunk_asset_type(
+    project_id: int, chunk_number: int, payload: AssetTypeUpdate, db: Session = Depends(get_db)
+):
+    """Update asset_type and search_keywords for a single chunk."""
+    chunk = db.query(Chunk).filter(
+        Chunk.project_id == project_id,
+        Chunk.chunk_number == chunk_number,
+    ).first()
+    if not chunk:
+        raise HTTPException(status_code=404, detail="Chunk no encontrado")
+    valid_types = ("clip_bank", "stock_video", "title_card", "web_image", "ai_image", "archive_footage", "space_media")
+    if payload.asset_type not in valid_types:
+        raise HTTPException(status_code=400, detail=f"Tipo inválido. Válidos: {valid_types}")
+    chunk.asset_type = payload.asset_type
+    if payload.search_keywords:
+        chunk.search_keywords = payload.search_keywords
+    db.commit()
+    return {"ok": True, "chunk_number": chunk_number, "asset_type": chunk.asset_type}
 
 
 @router.get("/{project_id}/chunk/{chunk_number}/image")
@@ -646,7 +726,8 @@ def get_chunk_image(project_id: int, chunk_number: int, db: Session = Depends(ge
     suffix = img_path.suffix.lower()
     media_types = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
     media_type = media_types.get(suffix, "image/jpeg")
-    return FileResponse(str(img_path), media_type=media_type)
+    return FileResponse(str(img_path), media_type=media_type,
+                        headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 @router.get("/{project_id}/chunk/{chunk_number}/video")
@@ -663,7 +744,8 @@ def get_chunk_video(project_id: int, chunk_number: int, db: Session = Depends(ge
     vid_path = Path(chunk.video_path)
     if not vid_path.exists():
         raise HTTPException(status_code=404, detail=f"Archivo de video no encontrado: {chunk.video_path}")
-    return FileResponse(str(vid_path), media_type="video/mp4")
+    return FileResponse(str(vid_path), media_type="video/mp4",
+                        headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 @router.post("/{project_id}/retry-chunk-image/{chunk_number}", response_model=ProjectOut)

@@ -1,0 +1,19 @@
+{
+  "name": "malderon-remotion",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "render": "remotion render src/Root.tsx TitleCard"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0",
+    "@remotion/google-fonts": "^4.0",
+    "react": "^18",
+    "react-dom": "^18",
+    "remotion": "^4.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18",
+    "typescript": "^5"
+  }
+}

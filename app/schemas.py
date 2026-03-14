@@ -37,7 +37,9 @@ class ChunkOut(BaseModel):
     end_ms: Optional[int] = None
     asset_type: Optional[str] = None
     asset_source: Optional[str] = None
+    search_keywords: Optional[str] = None
     overlay_text: Optional[str] = None
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

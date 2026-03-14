@@ -5,7 +5,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>YouTube Video Creator</title>
-  <link rel="stylesheet" href="/static/css/style.css?v=20260310g" />
+  <link rel="stylesheet" href="/static/css/style.css?v=20260313f" />
 </head>
 
 <body>
@@ -416,9 +416,14 @@
         <div class="chunks-section" id="chunksSection" style="display:none">
           <div class="chunks-section-header">
             <h2>Escenas <span id="chunksCount" class="chunks-count"></span></h2>
+            <div id="stockActionButtons" style="display:none; gap:8px; align-items:center; flex-wrap:wrap;">
+              <div id="assetTypeFilters" class="asset-type-filters"></div>
+              <button class="btn btn-sm" id="btnPlanScenesTop" onclick="planScenes()">🧠 Planificar</button>
+              <button class="btn btn-sm" id="btnSearchStockTop" onclick="searchStockAssets()">🔍 Buscar Assets</button>
+            </div>
           </div>
           <div class="scenes-table">
-            <div class="scenes-table-header">
+            <div class="scenes-table-header" id="scenesTableHeader">
               <div class="st-col st-num">#</div>
               <div class="st-col st-img">Imagen</div>
               <div class="st-col st-text">Guion</div>
@@ -514,18 +519,8 @@
             </div>
           </div>
 
-          <!-- ── Stock footage mode placeholder ── -->
-          <div id="stockModeControls" style="display:none;">
-            <div style="text-align:center; padding: 24px 0;">
-              <div style="font-size: 32px; margin-bottom: 8px;">📹</div>
-              <h3 style="margin-bottom: 6px; color: var(--text);">Modo Stock Footage</h3>
-              <p class="scenes-ready-hint" style="margin: 0 auto 16px;">Analiza las escenas y busca videos/imágenes de stock automáticamente.</p>
-              <button class="btn" id="btnSearchStockAssets" onclick="searchStockAssets()">
-                🔍 Buscar Assets de Stock
-              </button>
-            </div>
-            <div id="stockAssetsGrid" style="display:none; margin-top: 16px;"></div>
-          </div>
+          <!-- ── Stock footage mode (buttons moved to chunks header) ── -->
+          <div id="stockModeControls" style="display:none;"></div>
 
         </div>
 
@@ -546,8 +541,8 @@
               <label class="modal-prompt-label" id="videoModalLabel">Prompt de animación</label>
               <textarea id="videoModalPrompt" class="modal-prompt-textarea" rows="3"></textarea>
               <div class="modal-prompt-actions">
-                <button class="btn btn-ghost btn-sm" onclick="saveMotionPromptFromModal()">💾 Guardar prompt</button>
-                <button class="btn btn-primary btn-sm" onclick="saveAndRegenerateVideo()">🔄 Regenerar video</button>
+                <button id="videoModalSaveBtn" class="btn btn-ghost btn-sm" onclick="saveMotionPromptFromModal()">💾 Guardar prompt</button>
+                <button id="videoModalRegenBtn" class="btn btn-primary btn-sm" onclick="saveAndRegenerateVideo()">🔄 Regenerar video</button>
               </div>
             </div>
           </div>
@@ -1060,10 +1055,20 @@
   </div>
 
   <!-- Chain Config Modal -->
-  <div id="chainModal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);align-items:center;justify-content:center;"></div>
+  <div id="chainModal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);align-items:center;justify-content:center;">
+    <div class="chain-modal-content">
+      <h3 id="chainTitle">Cadena de busqueda</h3>
+      <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px;">Arrastra para cambiar el orden. Clic para activar/desactivar.</p>
+      <ul class="chain-list" id="chainList"></ul>
+      <div class="chain-actions">
+        <button class="btn btn-sm" type="button" data-action="cancel">Cancelar</button>
+        <button class="btn btn-sm btn-primary" type="button" data-action="save">Guardar</button>
+      </div>
+    </div>
+  </div>
 
   <script src="/static/js/canvas-player.js?v=20260310c"></script>
-  <script src="/static/js/app.js?v=20260312a"></script>
+  <script src="/static/js/app.js?v=20260313h"></script>
 </body>
 
 </html>

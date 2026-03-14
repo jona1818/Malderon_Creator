@@ -82,7 +82,16 @@ def _get_reference_style(db, project) -> str | None:
     return None
 
 
-# ── Logging helper ────────────────────────────────────────────────────────────
+# ── Logging helpers ───────────────────────────────────────────────────────────
+
+def _safe_print(msg: str) -> None:
+    import sys as _sys
+    try:
+        _sys.stdout.buffer.write((msg + "\n").encode("utf-8", errors="replace"))
+        _sys.stdout.buffer.flush()
+    except Exception:
+        pass
+
 
 def _log(db: Session, project_id: int, message: str, stage: str = "", level: str = "info"):
     from ..models import Log
@@ -157,6 +166,79 @@ def rendered_dir(slug: str) -> Path:
 
 def final_dir(slug: str) -> Path:
     return project_dir(slug) / "final"
+
+
+# ── Short title generator for title_card scenes ──────────────────────────────
+
+def _generate_short_title(scene_text: str, overlay_text: str = "", project_title: str = "") -> str:
+    """Use Gemini (via OpenRouter) to generate a short 2-5 word title.
+
+    Returns a concise title suitable for animated title cards.
+    Falls back to smart extraction if the API call fails.
+    """
+    # Only skip Gemini if overlay_text is a REAL title (e.g. "#10 Miniatures Over CGI")
+    import re as _re
+    if overlay_text and len(overlay_text.split()) <= 5:
+        # Real title: starts with #N pattern
+        if _re.match(r'^#\d+', overlay_text):
+            _safe_print(f"[TitleCard] Using existing short title: '{overlay_text}'")
+            return overlay_text
+        # Real title: no sentence punctuation, no filler words, no contractions
+        _lower = overlay_text.lower()
+        _filler_starts = ['the ', 'it ', 'but ', 'and ', 'from ', 'was ', 'were ',
+                          'this ', 'that ', 'a ', 'an ']
+        _is_fragment = (
+            overlay_text.rstrip().endswith(('.', ',', '!', '?', "'t", "n't"))
+            or any(_lower.startswith(w) for w in _filler_starts)
+        )
+        if not _is_fragment:
+            _safe_print(f"[TitleCard] Using existing short title: '{overlay_text}'")
+            return overlay_text
+
+    try:
+        from openai import OpenAI
+        from ..config import settings as _s
+        # Use OpenRouter + Gemini (same as claude_service.py)
+        client = OpenAI(
+            api_key=_s.openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1",
+        )
+
+        # Always prefer scene_text for context — overlay_text may be a truncated fragment
+        text_input = scene_text or overlay_text
+        resp = client.chat.completions.create(
+            model="google/gemini-2.0-flash-lite-001",
+            max_tokens=30,
+            messages=[
+                {"role": "system", "content": (
+                    "Generate a SHORT title (2-5 words max) for a video title card. "
+                    "The title should be punchy and cinematic. "
+                    "Return ONLY the title text, nothing else. No quotes, no explanation. "
+                    "Examples: 'Independence Day', 'The Hidden Truth', '#10 Miniatures Over CGI', "
+                    "'Cultural Reset', '20 Hidden Facts'"
+                )},
+                {"role": "user", "content": (
+                    f"Video: {project_title}\n"
+                    f"Scene text: {text_input[:200]}\n\n"
+                    f"Short title:"
+                )},
+            ],
+        )
+        title = resp.choices[0].message.content.strip().strip('"').strip("'")
+        if title and len(title) <= 60:
+            _safe_print(f"[TitleCard] Generated short title: '{title}' (from: '{text_input[:50]}...')")
+            return title
+    except Exception as exc:
+        _safe_print(f"[TitleCard] Short title generation failed: {exc}")
+
+    # Fallback: smart extraction from scene_text (not overlay which may be garbage)
+    fallback = scene_text or overlay_text or "Title"
+    # Remove common filler starts
+    cleaned = _re.sub(r'^(The |It |But |And |From |Get |Was |Were |This |That |An? )', '', fallback, flags=_re.IGNORECASE)
+    # Try to extract a proper noun or key phrase
+    words = cleaned.split()
+    short = " ".join(words[:3])
+    return short if short else "Title"
 
 
 # ── Entry points ──────────────────────────────────────────────────────────────
@@ -775,6 +857,78 @@ def start_create_scenes_from_srt(project_id: int) -> None:
     t.start()
 
 
+# ── Scene planning (visual analysis only) ────────────────────────────────────
+
+def _run_plan_scenes(project_id: int, allowed_types: list | None = None) -> None:
+    """Run visual analysis on all scenes and store asset_type + search_keywords.
+    Does NOT search or download assets — only classifies."""
+    db = SessionLocal()
+    try:
+        project = db.query(Project).filter(Project.id == project_id).first()
+        if not project:
+            return
+
+        types_label = ", ".join(allowed_types) if allowed_types else "todos"
+        _log(db, project_id, f"🧠 Planificando escenas (tipos: {types_label})…", stage="plan_scenes")
+
+        chunks = (
+            db.query(Chunk)
+            .filter(Chunk.project_id == project_id)
+            .order_by(Chunk.chunk_number)
+            .all()
+        )
+        if not chunks:
+            _log(db, project_id, "No hay escenas para planificar.", stage="plan_scenes")
+            return
+
+        scenes_for_analysis = [
+            {"id": c.chunk_number, "texto": c.scene_text or ""}
+            for c in chunks
+        ]
+        full_script = project.script_final or project.script or ""
+        collection = project.collection or "general"
+
+        analyses = visual_analyzer_service.analyze_scenes(
+            full_script, scenes_for_analysis, collection,
+            allowed_types=allowed_types,
+            project_title=project.title or "",
+        )
+        analysis_map = {a["scene_id"]: a for a in analyses}
+
+        # Store classification in each chunk
+        for chunk in chunks:
+            a = analysis_map.get(chunk.chunk_number)
+            if not a:
+                continue
+            update = {"asset_type": a.get("asset_type", "stock_video")}
+            query = a.get("search_query", "")
+            query_alt = a.get("search_query_alt", "")
+            if query:
+                update["search_keywords"] = f"{query}|{query_alt}" if query_alt else query
+            if a.get("has_overlay_text") and a.get("overlay_text"):
+                update["overlay_text"] = a["overlay_text"]
+            _update_chunk(db, chunk, **update)
+
+        _log(db, project_id,
+             f"✅ Planificación completada: {len(analyses)} escenas clasificadas.",
+             stage="plan_scenes")
+
+    except Exception as exc:
+        _safe_print(f"[plan_scenes] Error: {exc}")
+        try:
+            _log(db, project_id, f"❌ Error planificando: {exc}", stage="plan_scenes", level="error")
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
+def start_plan_scenes(project_id: int, allowed_types: list | None = None) -> None:
+    """Launch scene planning in background thread."""
+    t = threading.Thread(target=_run_plan_scenes, args=(project_id, allowed_types), daemon=True)
+    t.start()
+
+
 # ── Stock footage asset search ────────────────────────────────────────────────
 
 def _run_stock_asset_search(project_id: int) -> None:
@@ -799,30 +953,81 @@ def _run_stock_asset_search(project_id: int) -> None:
             _update_project(db, project, status=ProjectStatus.images_ready)
             return
 
-        # Step 1: Visual analysis with Claude Haiku
+        # Clear old assets — DB fields AND files on disk
+        _project_dir = PROJECTS_PATH / project.slug
+        assets_dir = _project_dir / "assets"
+        for c in chunks:
+            # Delete old files from disk
+            for old_path in (c.image_path, c.video_path):
+                if old_path:
+                    try:
+                        Path(old_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            # Also delete by naming convention to catch orphans
+            for ext in (".jpg", ".mp4", ".png"):
+                try:
+                    (assets_dir / f"scene_{c.chunk_number}{ext}").unlink(missing_ok=True)
+                except Exception:
+                    pass
+            c.image_path = None
+            c.video_path = None
+            c.asset_source = None
+        db.commit()
+
+        # Build analysis_map: use existing plan for scenes that have asset_type,
+        # only analyze unplanned scenes with Claude
+        analysis_map = {}
+        planned_chunks = [c for c in chunks if c.asset_type]
+        unplanned_chunks = [c for c in chunks if not c.asset_type]
+
+        # Preserve existing classifications
+        for c in planned_chunks:
+            kw = (c.search_keywords or "").split("|")
+            analysis_map[c.chunk_number] = {
+                "scene_id": c.chunk_number,
+                "asset_type": c.asset_type,
+                "search_query": kw[0] if kw else "nature landscape",
+                "search_query_alt": kw[1] if len(kw) > 1 else "aerial view",
+                "has_overlay_text": bool(c.overlay_text),
+                "overlay_text": c.overlay_text,
+            }
+
+        if planned_chunks:
+            _log(db, project_id,
+                 f"📋 Usando planificación existente ({len(planned_chunks)} escenas pre-clasificadas).",
+                 stage="stock_search")
+
+        if unplanned_chunks:
+            # Only analyze scenes without asset_type
+            _log(db, project_id,
+                 f"🧠 Analizando {len(unplanned_chunks)} escenas sin plan con Claude Haiku…",
+                 stage="stock_search")
+
+            scenes_for_analysis = [
+                {"id": c.chunk_number, "texto": c.scene_text or ""}
+                for c in unplanned_chunks
+            ]
+            full_script = project.script_final or project.script or ""
+            collection = project.collection or "general"
+
+            analyses = visual_analyzer_service.analyze_scenes(
+                full_script, scenes_for_analysis, collection,
+                project_title=project.title or "",
+            )
+            for a in analyses:
+                analysis_map[a["scene_id"]] = a
+
         _log(db, project_id,
-             f"🧠 Analizando {len(chunks)} escenas con Claude Haiku…",
+             f"✅ Análisis visual completado: {len(analysis_map)} escenas listas.",
              stage="stock_search")
 
-        scenes_for_analysis = [
-            {"id": c.chunk_number, "texto": c.scene_text or ""}
-            for c in chunks
-        ]
-        full_script = project.script_final or project.script or ""
-
-        analyses = visual_analyzer_service.analyze_scenes(full_script, scenes_for_analysis)
-
-        # Build lookup by scene_id
-        analysis_map = {a["scene_id"]: a for a in analyses}
-
-        _log(db, project_id,
-             f"✅ Análisis visual completado: {len(analyses)} escenas analizadas.",
-             stage="stock_search")
-
-        # Step 2: Search and download assets for each scene
+        # Step 2: Search assets + generate AI fallback immediately per scene
         project_dir = PROJECTS_PATH / project.slug
         total = len(chunks)
         found_count = 0
+        used_videos: set = set()  # Track used video URLs to prevent duplicates
+        poll_key = _get_pollinations_api_key(db)
 
         for idx, chunk in enumerate(chunks, 1):
             analysis = analysis_map.get(chunk.chunk_number, {})
@@ -838,18 +1043,108 @@ def _run_stock_asset_search(project_id: int) -> None:
                  f"tipo={analysis.get('asset_type')}, query='{analysis.get('search_query')}'",
                  stage="stock_search")
 
+            # Calculate scene duration from SRT timings
+            scene_duration = None
+            if chunk.start_ms is not None and chunk.end_ms is not None:
+                scene_duration = (chunk.end_ms - chunk.start_ms) / 1000.0
+
+            # ── Title card: render with Remotion instead of searching ──
+            scene_asset_type_pre = chunk.asset_type or analysis.get("asset_type", "")
+            if scene_asset_type_pre == "title_card":
+                raw_text = (chunk.overlay_text
+                            or analysis.get("overlay_text", "")
+                            or (chunk.scene_text or "")[:120].strip())
+                # Generate a SHORT title (2-5 words) instead of using full text
+                overlay = _generate_short_title(
+                    scene_text=chunk.scene_text or "",
+                    overlay_text=raw_text,
+                    project_title=project.title or "",
+                ) if raw_text else ""
+                if overlay:
+                    from .remotion_service import render_title_card
+
+                    # Step 1: Search for a background image
+                    bg_image_path = None
+                    _log(db, project_id,
+                         f"🖼️ [{idx}/{total}] Escena {chunk.chunk_number}: buscando imagen de fondo para título…",
+                         stage="stock_search")
+                    try:
+                        bg_analysis = dict(analysis)
+                        bg_analysis["asset_type"] = "web_image"  # Force web image search
+                        bg_result = stock_search_service.find_asset_for_scene(
+                            scene_id=chunk.chunk_number,
+                            analysis=bg_analysis,
+                            project_dir=project_dir,
+                            collection=project.collection or "general",
+                            used_videos=used_videos,
+                            min_duration=None,
+                            scene_text=chunk.scene_text or "",
+                            project_title=project.title or "",
+                        )
+                        bg_local = bg_result.get("local_path")
+                        if bg_local and not bg_local.endswith(".mp4"):
+                            bg_image_path = Path(bg_local)
+                            _log(db, project_id,
+                                 f"✅ [{idx}/{total}] Escena {chunk.chunk_number}: fondo encontrado → {Path(bg_local).name}",
+                                 stage="stock_search")
+                    except Exception as bg_exc:
+                        _safe_print(f"[TitleCard] Background search failed: {bg_exc}")
+
+                    # Step 2: Render title card with Remotion (with or without background)
+                    tc_path = project_dir / "assets" / f"title_{chunk.chunk_number}.mp4"
+                    tc_path.parent.mkdir(parents=True, exist_ok=True)
+                    tc_duration = scene_duration if scene_duration and scene_duration > 0 else 5.0
+                    bg_label = " + fondo" if bg_image_path else ""
+                    _log(db, project_id,
+                         f"📝 [{idx}/{total}] Escena {chunk.chunk_number}: renderizando título animado{bg_label} '{overlay[:50]}'…",
+                         stage="stock_search")
+                    tc_success = render_title_card(
+                        overlay, tc_path,
+                        duration_seconds=tc_duration,
+                        background_image=bg_image_path,
+                    )
+                    tc_kwargs = {"asset_type": "title_card", "overlay_text": overlay}
+                    if bg_image_path:
+                        tc_kwargs["image_path"] = str(bg_image_path)
+                    if tc_success:
+                        tc_kwargs["video_path"] = str(tc_path)
+                        tc_kwargs["asset_source"] = "remotion_title"
+                        tc_kwargs["status"] = ChunkStatus.done
+                        found_count += 1
+                        _log(db, project_id,
+                             f"✅ [{idx}/{total}] Escena {chunk.chunk_number}: título animado{bg_label} OK",
+                             stage="stock_search")
+                    else:
+                        tc_kwargs["status"] = ChunkStatus.error
+                        tc_kwargs["error_message"] = "Title card render failed"
+                        _log(db, project_id,
+                             f"❌ [{idx}/{total}] Escena {chunk.chunk_number}: error en título",
+                             stage="stock_search", level="warning")
+                    _update_chunk(db, chunk, **tc_kwargs)
+                    continue  # Skip normal stock search for title cards
+                # No text at all — mark error and skip
+                _update_chunk(db, chunk, status=ChunkStatus.error,
+                              error_message="Title card sin texto")
+                continue
+
             result = stock_search_service.find_asset_for_scene(
                 scene_id=chunk.chunk_number,
                 analysis=analysis,
                 project_dir=project_dir,
                 collection=project.collection or "general",
+                used_videos=used_videos,
+                min_duration=scene_duration,
+                scene_text=chunk.scene_text or "",
+                project_title=project.title or "",
             )
 
-            # Update chunk in DB
+            # Update chunk in DB — preserve planned asset_type
             update_kwargs = {
-                "asset_type": result.get("asset_type_found"),
                 "asset_source": result.get("asset_source"),
             }
+            # Only overwrite asset_type if chunk had NO plan
+            if not chunk.asset_type:
+                update_kwargs["asset_type"] = result.get("asset_type_found")
             if result.get("overlay_text"):
                 update_kwargs["overlay_text"] = result["overlay_text"]
 
@@ -861,59 +1156,52 @@ def _run_stock_asset_search(project_id: int) -> None:
                     update_kwargs["image_path"] = local_path
                 found_count += 1
 
-            _update_chunk(db, chunk, **update_kwargs)
-
-            source = result.get("asset_source", "?")
-            atype = result.get("asset_type_found", "none")
-            _log(db, project_id,
-                 f"{'✅' if local_path else '⚠️'} [{idx}/{total}] Escena {chunk.chunk_number}: "
-                 f"{atype} from {source}" + (f" → {Path(local_path).name}" if local_path else " → AI fallback"),
-                 stage="stock_search")
-
-        # Step 3: Generate AI images for scenes that need them
-        ai_chunks = [c for c in chunks if not c.video_path and not c.image_path]
-        # Refresh from DB since we updated them
-        ai_chunks = (
-            db.query(Chunk)
-            .filter(
-                Chunk.project_id == project_id,
-                Chunk.video_path.is_(None),
-                Chunk.image_path.is_(None),
-            )
-            .order_by(Chunk.chunk_number)
-            .all()
-        )
-
-        if ai_chunks:
-            _log(db, project_id,
-                 f"🎨 Generando {len(ai_chunks)} imágenes AI con Pollinations (fallback)…",
-                 stage="stock_search")
-            poll_key = _get_pollinations_api_key(db)
-            for chunk in ai_chunks:
+            # If no asset found, generate AI image IMMEDIATELY (no batch)
+            if not local_path and result.get("asset_type_found") == "ai_image":
                 try:
-                    analysis = analysis_map.get(chunk.chunk_number, {})
                     prompt = analysis.get("search_query", chunk.scene_text or "abstract background")
                     img_path = project_dir / "assets" / f"scene_{chunk.chunk_number}.jpg"
                     img_path.parent.mkdir(parents=True, exist_ok=True)
-
-                    _dispatch_generate_image(
-                        prompt, img_path,
-                        provider="pollinations", api_key=poll_key,
-                    )
-
+                    _log(db, project_id,
+                         f"🎨 Escena {chunk.chunk_number}: generando AI image… prompt='{prompt[:60]}'",
+                         stage="stock_search")
+                    _dispatch_generate_image(prompt, img_path, provider="pollinations", api_key=poll_key)
                     if img_path.exists() and img_path.stat().st_size > 1000:
-                        _update_chunk(db, chunk, image_path=str(img_path), asset_source="pollinations")
+                        update_kwargs["image_path"] = str(img_path)
+                        update_kwargs["asset_source"] = "pollinations"
+                        local_path = str(img_path)
                         _log(db, project_id,
-                             f"✅ Escena {chunk.chunk_number}: AI image generada.",
+                             f"✅ Escena {chunk.chunk_number}: AI image OK ({img_path.stat().st_size} bytes)",
                              stage="stock_search")
                     else:
+                        sz = img_path.stat().st_size if img_path.exists() else 0
                         _log(db, project_id,
-                             f"⚠️ Escena {chunk.chunk_number}: AI image falló.",
+                             f"⚠️ Escena {chunk.chunk_number}: AI image vacía o muy pequeña ({sz} bytes)",
                              stage="stock_search", level="warning")
                 except Exception as exc:
                     _log(db, project_id,
-                         f"⚠️ Escena {chunk.chunk_number}: AI image error: {exc}",
+                         f"❌ Escena {chunk.chunk_number}: AI image error: {exc}",
                          stage="stock_search", level="warning")
+
+            # Update chunk status based on search result
+            scene_asset_type = chunk.asset_type or analysis.get("asset_type", "")
+            if local_path:
+                update_kwargs["status"] = ChunkStatus.done
+            elif scene_asset_type == "ai_image" and not local_path:
+                update_kwargs["status"] = ChunkStatus.error
+                update_kwargs["error_message"] = "AI image generation failed"
+            else:
+                # Searched but not found (clip_bank, web_image, etc.)
+                update_kwargs["status"] = ChunkStatus.error
+                update_kwargs["error_message"] = "sin asset"
+
+            _update_chunk(db, chunk, **update_kwargs)
+
+            source = update_kwargs.get("asset_source", "?")
+            _log(db, project_id,
+                 f"{'✅' if local_path else '⚠️'} [{idx}/{total}] Escena {chunk.chunk_number}: "
+                 f"from {source}" + (f" → {Path(local_path).name}" if local_path else " → sin asset"),
+                 stage="stock_search")
 
         _update_project(db, project, status=ProjectStatus.images_ready)
         _log(db, project_id,
@@ -1651,7 +1939,11 @@ def _stock_branch(db, project_id, chunk, n, slug, narration, visual_desc, c_dir)
 # ── Per-chunk image retry ─────────────────────────────────────────────────────
 
 def _run_retry_chunk_image(project_id: int, chunk_number: int) -> None:
-    """Re-generate image for a single scene chunk using Pollinations."""
+    """Re-generate/re-search image for a single scene chunk.
+
+    - Stock mode: re-searches web images (Bing/Brave/Wikimedia) with Gemini validation.
+    - Animated mode: re-generates with Pollinations AI (unchanged).
+    """
     db = SessionLocal()
     try:
         project = db.query(Project).filter(Project.id == project_id).first()
@@ -1667,6 +1959,154 @@ def _run_retry_chunk_image(project_id: int, chunk_number: int) -> None:
             _log(db, project_id, f"Chunk {chunk_number} no encontrado.", stage="retry_media", level="error")
             return
 
+        # ── Stock mode: re-search from web ────────────────────────────────────
+        if project.mode == VideoMode.stock:
+            _log(db, project_id,
+                 f"[Retry {chunk_number}] Re-buscando imagen de stock…",
+                 stage=f"retry_media_{chunk_number}")
+
+            # Hash the OLD image so we can reject identical downloads
+            import hashlib
+            old_hash = None
+            if chunk.image_path and Path(chunk.image_path).exists():
+                try:
+                    old_hash = hashlib.md5(Path(chunk.image_path).read_bytes()).hexdigest()
+                except Exception:
+                    pass
+
+            # Delete old asset files
+            for old_path in (chunk.image_path, chunk.video_path):
+                if old_path:
+                    try:
+                        Path(old_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+            _update_chunk(db, chunk, status=ChunkStatus.pending,
+                          image_path=None, video_path=None, asset_source=None,
+                          error_message=None)
+
+            project_dir = PROJECTS_PATH / project.slug
+
+            # ── Title card: re-render with Remotion ──
+            if (chunk.asset_type or "") == "title_card":
+                raw_text = chunk.overlay_text or (chunk.scene_text or "")[:120].strip()
+                overlay = _generate_short_title(
+                    scene_text=chunk.scene_text or "",
+                    overlay_text=raw_text,
+                    project_title=project.title or "",
+                ) if raw_text else ""
+                if overlay:
+                    from .remotion_service import render_title_card
+                    tc_path = project_dir / "assets" / f"title_{chunk.chunk_number}.mp4"
+                    tc_path.parent.mkdir(parents=True, exist_ok=True)
+                    tc_duration = 5.0
+                    if chunk.start_ms is not None and chunk.end_ms is not None:
+                        tc_duration = max((chunk.end_ms - chunk.start_ms) / 1000.0, 1.0)
+
+                    # Search for a new background image
+                    bg_image_path = None
+                    try:
+                        kw = (chunk.search_keywords or "").split("|")
+                        bg_analysis = {
+                            "asset_type": "web_image",
+                            "search_query": kw[0] if kw else "cinematic background",
+                            "search_query_alt": kw[1] if len(kw) > 1 else "movie scene",
+                        }
+                        bg_result = stock_search_service.find_asset_for_scene(
+                            scene_id=chunk.chunk_number,
+                            analysis=bg_analysis,
+                            project_dir=project_dir,
+                            collection=project.collection or "general",
+                            used_videos=set(),
+                            scene_text=chunk.scene_text or "",
+                            project_title=project.title or "",
+                        )
+                        bg_local = bg_result.get("local_path")
+                        if bg_local and not bg_local.endswith(".mp4"):
+                            bg_image_path = Path(bg_local)
+                    except Exception:
+                        pass
+
+                    success = render_title_card(
+                        overlay, tc_path,
+                        duration_seconds=tc_duration,
+                        background_image=bg_image_path,
+                    )
+                    update_kw = {}
+                    if success:
+                        update_kw["video_path"] = str(tc_path)
+                        update_kw["asset_source"] = "remotion_title"
+                        update_kw["status"] = ChunkStatus.done
+                    else:
+                        update_kw["status"] = ChunkStatus.error
+                        update_kw["error_message"] = "Title card render failed"
+                    _update_chunk(db, chunk, **update_kw)
+                    _log(db, project_id,
+                         f"[Retry {chunk_number}] Title card: {'OK' if success else 'FAILED'}",
+                         stage=f"retry_media_{chunk_number}_done")
+                    return
+
+            # Build analysis from chunk's existing plan
+            kw = (chunk.search_keywords or "").split("|")
+            analysis = {
+                "asset_type": chunk.asset_type or "web_image",
+                "search_query": kw[0] if kw else "nature landscape",
+                "search_query_alt": kw[1] if len(kw) > 1 else "aerial view",
+                "has_overlay_text": bool(chunk.overlay_text),
+                "overlay_text": chunk.overlay_text,
+            }
+
+            result = stock_search_service.find_asset_for_scene(
+                scene_id=chunk.chunk_number,
+                analysis=analysis,
+                project_dir=project_dir,
+                collection=project.collection or "general",
+                used_videos=set(),
+                min_duration=None,
+                scene_text=chunk.scene_text or "",
+                project_title=project.title or "",
+                reject_hash=old_hash,
+            )
+
+            local_path = result.get("local_path")
+            update_kwargs = {"asset_source": result.get("asset_source")}
+
+            if local_path:
+                if local_path.endswith(".mp4"):
+                    update_kwargs["video_path"] = local_path
+                else:
+                    update_kwargs["image_path"] = local_path
+                update_kwargs["status"] = ChunkStatus.done
+            else:
+                # Stock search failed — generate AI image as last resort
+                try:
+                    poll_key = _get_pollinations_api_key(db)
+                    prompt = analysis.get("search_query", chunk.scene_text or "abstract background")
+                    img_path = project_dir / "assets" / f"scene_{chunk.chunk_number}.jpg"
+                    img_path.parent.mkdir(parents=True, exist_ok=True)
+                    _log(db, project_id,
+                         f"[Retry {chunk_number}] Stock sin resultados, generando AI image…",
+                         stage=f"retry_media_{chunk_number}")
+                    _dispatch_generate_image(prompt, img_path, provider="pollinations", api_key=poll_key)
+                    if img_path.exists() and img_path.stat().st_size > 1000:
+                        update_kwargs["image_path"] = str(img_path)
+                        update_kwargs["asset_source"] = "pollinations"
+                        update_kwargs["status"] = ChunkStatus.done
+                    else:
+                        update_kwargs["status"] = ChunkStatus.error
+                        update_kwargs["error_message"] = "No se encontró imagen de stock ni AI"
+                except Exception as exc:
+                    update_kwargs["status"] = ChunkStatus.error
+                    update_kwargs["error_message"] = f"Error: {exc}"
+
+            _update_chunk(db, chunk, **update_kwargs)
+            _log(db, project_id,
+                 f"[Retry {chunk_number}] ✓ Re-búsqueda completada: {update_kwargs.get('asset_source', '?')}",
+                 stage=f"retry_media_{chunk_number}_done")
+            return
+
+        # ── Animated mode: regenerate with Pollinations (unchanged) ───────────
         api_key = _get_pollinations_api_key(db)
 
         # Reset chunk status so _generate_media_for_chunk doesn't skip it

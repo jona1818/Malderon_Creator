@@ -181,8 +181,9 @@ class CanvasPlayer {
   }
 
   _chunkMediaUrl(chunk) {
-    if (chunk.video_path) return `/api/projects/${this.projectId}/chunk/${chunk.chunk_number}/video`;
-    if (chunk.image_path) return `/api/projects/${this.projectId}/chunk/${chunk.chunk_number}/image`;
+    const cb = chunk.updated_at ? `?t=${new Date(chunk.updated_at).getTime()}` : `?t=${Date.now()}`;
+    if (chunk.video_path) return `/api/projects/${this.projectId}/chunk/${chunk.chunk_number}/video${cb}`;
+    if (chunk.image_path) return `/api/projects/${this.projectId}/chunk/${chunk.chunk_number}/image${cb}`;
     return null;
   }
 

@@ -18,6 +18,17 @@ const _chunkData = {};
 // Cached settings (loaded on demand)
 let _settings = {};
 
+// Asset type filter — which types the planner can assign
+const ALL_ASSET_TYPES = [
+  { key: 'clip_bank',    icon: '🎬', label: 'Clip Bank' },
+  { key: 'title_card',   icon: '📝', label: 'Titulo' },
+  { key: 'web_image',    icon: '🌐', label: 'Img Web' },
+  { key: 'ai_image',     icon: '🤖', label: 'AI Image' },
+  { key: 'stock_video',  icon: '📹', label: 'Stock Vid' },
+  { key: 'archive_footage', icon: '🏛️', label: 'Archivo' },
+];
+let _activeAssetTypes = new Set(['clip_bank', 'title_card', 'web_image', 'ai_image']);
+
 /** Return capitalised image provider name from settings. */
 function _imgProviderName() {
   const p = (_settings['image_provider'] || 'wavespeed');
@@ -344,8 +355,34 @@ async function refreshDetail(projectId) {
     // ── 4. Escenas — visible desde scenes_ready en adelante ──────────────
     const chunksSection = document.getElementById('chunksSection');
     const hiddenStatuses = ['awaiting_voice_config', 'awaiting_audio_approval', 'audio_approved'];
+    const _isStockMode = p.mode === 'stock';
+    _isStockGlobal = _isStockMode;
     if (chunks.length > 0 && !hiddenStatuses.includes(p.status)) {
       chunksSection.style.display = '';
+
+      // Dynamic header based on mode
+      const hdr = document.getElementById('scenesTableHeader');
+      if (hdr) {
+        if (_isStockMode) {
+          hdr.innerHTML = `
+            <div class="st-col st-num">#</div>
+            <div class="st-col st-text">Guion</div>
+            <div class="st-col st-salida">Salida</div>
+            <div class="st-col st-time">Tiempo</div>
+            <div class="st-col st-status">Estado</div>
+            <div class="st-col st-actions"></div>`;
+        } else {
+          hdr.innerHTML = `
+            <div class="st-col st-num">#</div>
+            <div class="st-col st-img">Imagen</div>
+            <div class="st-col st-text">Guion</div>
+            <div class="st-col st-vid">Video</div>
+            <div class="st-col st-time">Tiempo</div>
+            <div class="st-col st-status">Estado</div>
+            <div class="st-col st-actions"></div>`;
+        }
+      }
+
       const countEl = document.getElementById('chunksCount');
       if (countEl) {
         const doneImgs = chunks.filter(c => c.image_path).length;
@@ -367,7 +404,7 @@ async function refreshDetail(projectId) {
 
       // Build a fingerprint per chunk to detect changes
       const newFingerprint = chunks.map(c =>
-        `${c.chunk_number}:${c.status}:${c.image_path||''}:${c.video_path||''}:${c.image_prompt||''}:${c.motion_prompt||''}`
+        `${c.chunk_number}:${c.status}:${c.image_path||''}:${c.video_path||''}:${c.image_prompt||''}:${c.motion_prompt||''}:${c.asset_type||''}:${c.updated_at||''}`
       ).join('|');
 
       // Only rebuild if data actually changed
@@ -380,8 +417,9 @@ async function refreshDetail(projectId) {
         chunks.forEach(c => {
           const n = c.chunk_number;
           const text = c.scene_text || '';
-          const imgUrl = c.image_path ? `/api/projects/${p.id}/chunk/${n}/image` : '';
-          const vidUrl = c.video_path ? `/api/projects/${p.id}/chunk/${n}/video` : '';
+          const cacheBust = c.updated_at ? `?t=${new Date(c.updated_at).getTime()}` : `?t=${Date.now()}`;
+          const imgUrl = c.image_path ? `/api/projects/${p.id}/chunk/${n}/image${cacheBust}` : '';
+          const vidUrl = c.video_path ? `/api/projects/${p.id}/chunk/${n}/video${cacheBust}` : '';
 
           // Time
           let timeHtml = '<span class="st-time-val">—</span>';
@@ -407,6 +445,16 @@ async function refreshDetail(projectId) {
             </div>`;
           }
 
+          // Asset type badge (stock mode)
+          const _assetLabels = {clip_bank:'Clip Bank',stock_video:'Stock Vid',title_card:'Titulo',web_image:'Img Web',ai_image:'AI Image',archive_footage:'Archivo',space_media:'Espacio',video:'Video',image:'Imagen'};
+          const _assetIcons = {clip_bank:'🎬',stock_video:'📹',title_card:'📝',web_image:'🌐',ai_image:'🤖',archive_footage:'🏛️',space_media:'🚀',video:'🎬',image:'🖼️'};
+          let assetBadge = '';
+          if (c.asset_type) {
+            const aLabel = _assetLabels[c.asset_type] || c.asset_type;
+            const aIcon = _assetIcons[c.asset_type] || '';
+            assetBadge = `<span class="asset-badge ${c.asset_type}" data-chunk="${n}" onclick="event.stopPropagation(); toggleAssetDropdown(this, ${p.id}, ${n})" title="${c.search_keywords || ''}">${aIcon} ${aLabel}</span>`;
+          }
+
           // Prompt tags (hover to see full text)
           let promptTags = '';
           if (c.image_prompt) {
@@ -416,32 +464,89 @@ async function refreshDetail(projectId) {
             promptTags += `<span class="st-prompt-tag" title="${escHtml(c.motion_prompt)}">MOV</span>`;
           }
 
-          // Status
-          const statusLabel = c.status === 'done' ? 'done' : c.status === 'processing' ? 'proc' : c.status === 'error' ? 'error' : c.status;
+          // Status — descriptive labels for stock mode
+          let statusLabel, statusClass;
+          if (_isStockMode) {
+            if (c.image_path || c.video_path) {
+              statusLabel = 'listo'; statusClass = 'done';
+            } else if (c.status === 'error' && c.error_message === 'sin asset') {
+              statusLabel = 'sin asset'; statusClass = 'no-asset';
+            } else if (c.asset_type === 'title_card') {
+              statusLabel = 'título'; statusClass = 'title-card';
+            } else if (c.status === 'done') {
+              statusLabel = 'listo'; statusClass = 'done';
+            } else if (c.status === 'processing') {
+              statusLabel = 'buscando'; statusClass = 'processing';
+            } else if (c.status === 'error') {
+              statusLabel = 'error'; statusClass = 'error';
+            } else {
+              statusLabel = 'pendiente'; statusClass = 'pending';
+            }
+          } else {
+            statusLabel = c.status === 'done' ? 'done' : c.status === 'processing' ? 'proc' : c.status === 'error' ? 'error' : c.status;
+            statusClass = c.status;
+          }
 
           // Action buttons
           let actions = '';
-          if (c.image_prompt) {
-            actions += `<button class="st-action-btn" title="Rehacer imagen" onclick="event.stopPropagation(); regenerateImageGenaipro(${n})">&#x1F504;</button>`;
+          if (_isStockMode) {
+            // Stock mode: "Rebuscar" button to re-search the asset
+            if (c.image_path || c.video_path) {
+              actions += `<button class="st-action-btn" title="Rebuscar" onclick="event.stopPropagation(); retryStockSearch(${n})">&#x1F504;</button>`;
+            }
+          } else {
+            // Animated mode: original buttons
+            if (c.image_prompt) {
+              actions += `<button class="st-action-btn" title="Rehacer imagen" onclick="event.stopPropagation(); regenerateImageGenaipro(${n})">&#x1F504;</button>`;
+            }
+            if (c.image_path) {
+              actions += `<button class="st-action-btn" title="Reanimar video" onclick="event.stopPropagation(); retryMetaAnimation(${n})">&#x26A1;</button>`;
+            }
           }
-          if (c.image_path) {
-            actions += `<button class="st-action-btn" title="Reanimar video" onclick="event.stopPropagation(); retryMetaAnimation(${n})">&#x26A1;</button>`;
+
+          // Build "Salida" cell for stock mode (shows whatever output exists)
+          let salidaCell = `<div class="st-thumb-empty">—</div>`;
+          if (vidUrl) {
+            salidaCell = `<div class="st-vid-wrap" onclick="openVideoPreview('${vidUrl}', ${n})">
+              <video src="${vidUrl}" preload="metadata" muted></video>
+              <div class="st-vid-play">&#9654;</div>
+            </div>`;
+          } else if (imgUrl) {
+            salidaCell = `<img class="st-thumb" src="${imgUrl}" alt="Escena ${n}" loading="lazy" onclick="openImagePreview('${imgUrl}', ${n})" />`;
           }
 
           const row = document.createElement('div');
-          row.className = 'scene-row';
-          row.innerHTML = `
-            <div class="st-col st-num">${n}</div>
-            <div class="st-col st-img">${imgCell}</div>
-            <div class="st-col st-text">
-              <div class="st-script">${escHtml(text)}</div>
-              ${promptTags ? `<div class="st-prompts">${promptTags}</div>` : ''}
-            </div>
-            <div class="st-col st-vid">${vidCell}</div>
-            <div class="st-col st-time">${timeHtml}</div>
-            <div class="st-col st-status"><span class="st-status-badge ${c.status}">${statusLabel}</span></div>
-            <div class="st-col st-actions">${actions}</div>
-          `;
+          row.className = 'scene-row' + (_isStockMode ? ' stock-mode' : '');
+
+          if (_isStockMode) {
+            // Stock: # | Guion (badge + text) | Salida | Tiempo | Estado | Actions
+            row.innerHTML = `
+              <div class="st-col st-num">${n}</div>
+              <div class="st-col st-text">
+                ${assetBadge ? `<div class="st-asset-row">${assetBadge}</div>` : ''}
+                <div class="st-script">${escHtml(text)}</div>
+                ${promptTags ? `<div class="st-prompts">${promptTags}</div>` : ''}
+              </div>
+              <div class="st-col st-salida">${salidaCell}</div>
+              <div class="st-col st-time">${timeHtml}</div>
+              <div class="st-col st-status"><span class="st-status-badge ${statusClass}">${statusLabel}</span></div>
+              <div class="st-col st-actions">${actions}</div>
+            `;
+          } else {
+            // Animated: # | Imagen | Guion | Video | Tiempo | Estado | Actions
+            row.innerHTML = `
+              <div class="st-col st-num">${n}</div>
+              <div class="st-col st-img">${imgCell}</div>
+              <div class="st-col st-text">
+                <div class="st-script">${escHtml(text)}</div>
+                ${promptTags ? `<div class="st-prompts">${promptTags}</div>` : ''}
+              </div>
+              <div class="st-col st-vid">${vidCell}</div>
+              <div class="st-col st-time">${timeHtml}</div>
+              <div class="st-col st-status"><span class="st-status-badge ${statusClass}">${statusLabel}</span></div>
+              <div class="st-col st-actions">${actions}</div>
+            `;
+          }
           list.appendChild(row);
         });
       }
@@ -452,41 +557,19 @@ async function refreshDetail(projectId) {
     // ── 4b. Imagen panel — visible en scenes_ready / generating_images / images_ready ──
     const scenesReadySection = document.getElementById('scenesReadySection');
     if (scenesReadySection) {
-      scenesReadySection.style.display = showImagePanel ? '' : 'none';
-
-      // Toggle animated vs stock controls
       const isStock = p.mode === 'stock';
-      const animatedControls = document.getElementById('animatedModeControls');
-      const stockControls = document.getElementById('stockModeControls');
-      if (animatedControls) animatedControls.style.display = isStock ? 'none' : '';
-      if (stockControls) stockControls.style.display = isStock ? '' : 'none';
+      // Stock mode: bottom panel hidden (buttons are in chunks header)
+      // Animated mode: show the panel with image generation controls
+      scenesReadySection.style.display = (!isStock && showImagePanel) ? '' : 'none';
 
-      // Render stock assets grid
-      if (isStock) {
-        const stockGrid = document.getElementById('stockAssetsGrid');
-        const hasAssets = chunks.some(c => c.asset_type);
-        if (stockGrid && hasAssets) {
-          stockGrid.style.display = '';
-          stockGrid.innerHTML = '<h4 style="margin-bottom:12px;color:var(--text);">Assets encontrados</h4>' +
-            '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;">' +
-            chunks.map(c => {
-              const src = c.asset_source || '?';
-              const atype = c.asset_type || 'pending';
-              const hasFile = c.video_path || c.image_path;
-              const badge = {pexels:'🟢 Pexels',pixabay:'🔵 Pixabay',nasa:'🚀 NASA',pollinations:'🎨 AI'}[src] || src;
-              const thumb = c.image_path ? `<img src="/api/projects/${p.id}/chunk/${c.chunk_number}/image" style="width:100%;height:120px;object-fit:cover;border-radius:6px;">` :
-                            c.video_path ? `<div style="width:100%;height:120px;background:var(--bg3);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:28px;">🎬</div>` :
-                            `<div style="width:100%;height:120px;background:var(--bg3);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:14px;color:var(--muted);">⏳ Pendiente</div>`;
-              return `<div style="background:var(--bg2);border-radius:8px;overflow:hidden;border:1px solid var(--border);">
-                ${thumb}
-                <div style="padding:8px;">
-                  <div style="font-size:12px;font-weight:600;color:var(--text);">Escena ${c.chunk_number}</div>
-                  <div style="font-size:11px;color:var(--muted);margin-top:2px;">${badge} · ${atype}</div>
-                  ${c.overlay_text ? `<div style="font-size:11px;color:var(--accent);margin-top:2px;">📝 ${c.overlay_text}</div>` : ''}
-                </div>
-              </div>`;
-            }).join('') + '</div>';
-        }
+      const animatedControls = document.getElementById('animatedModeControls');
+      if (animatedControls) animatedControls.style.display = isStock ? 'none' : '';
+
+      // Show/hide stock action buttons in the chunks header
+      const stockBtns = document.getElementById('stockActionButtons');
+      if (stockBtns) {
+        stockBtns.style.display = (isStock && showImagePanel) ? 'flex' : 'none';
+        if (isStock && showImagePanel) renderAssetTypeFilters();
       }
 
       // Character reference UI
@@ -1060,6 +1143,8 @@ async function openChainConfig(colName) {
     const data = await apiFetch(`/api/projects/collections/${colName}/chain`);
     const chain = data.search_chain || CHAIN_SOURCES.map(s => s.id);
     const disabled = data.disabled_sources || [];
+    // Ensure all known sources are in the chain (in case server returned partial list)
+    CHAIN_SOURCES.forEach(s => { if (!chain.includes(s.id)) chain.push(s.id); });
     _chainOrder = chain;
     _chainEnabled = {};
     CHAIN_SOURCES.forEach(s => { _chainEnabled[s.id] = !disabled.includes(s.id); });
@@ -1068,63 +1153,28 @@ async function openChainConfig(colName) {
     _chainEnabled = {};
     CHAIN_SOURCES.forEach(s => { _chainEnabled[s.id] = true; });
   }
-  renderChainModal();
+  _renderChainList();
   document.getElementById('chainModal').style.display = 'flex';
 }
 
-function renderChainModal() {
-  const modal = document.getElementById('chainModal');
-  if (!modal) return;
+function _renderChainList() {
+  const list = document.getElementById('chainList');
+  if (!list) return;
+  const titleEl = document.getElementById('chainTitle');
+  if (titleEl) titleEl.textContent = `Cadena de busqueda — ${_chainModalCol}`;
   const orderedSources = _chainOrder.map(id => CHAIN_SOURCES.find(s => s.id === id)).filter(Boolean);
-  const listHtml = orderedSources.map((s, i) => {
+  list.innerHTML = orderedSources.map((s, i) => {
     const enabled = _chainEnabled[s.id] !== false;
-    const draggable = !s.fixed;
+    const canDrag = !s.fixed;
     return `<li class="chain-item ${enabled ? '' : 'disabled'} ${s.fixed ? 'fixed' : ''}"
-                draggable="${draggable}" data-id="${s.id}"
-                ondragstart="chainDragStart(event)" ondragover="chainDragOver(event)"
-                ondrop="chainDrop(event)" ondragend="chainDragEnd(event)">
-      <span class="chain-toggle" onclick="toggleChainSource('${s.id}')">${enabled ? '✅' : '❌'}</span>
+                data-id="${s.id}" ${canDrag ? 'draggable="true"' : ''}>
+      <button type="button" class="chain-toggle" data-action="toggle" data-sid="${s.id}">${enabled ? '✅' : '❌'}</button>
       <span class="chain-pos">${i + 1}.</span>
       <span>${s.icon}</span>
       <span class="chain-label">${s.label}</span>
-      ${draggable ? '<span class="chain-grip">⠿</span>' : ''}
+      ${canDrag ? '<span class="chain-grip">⠿</span>' : ''}
     </li>`;
   }).join('');
-  modal.innerHTML = `
-    <div class="chain-modal-content">
-      <h3>⚙️ Cadena de búsqueda — ${_chainModalCol}</h3>
-      <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px;">Arrastrá para cambiar el orden. Clic para activar/desactivar.</p>
-      <ul class="chain-list">${listHtml}</ul>
-      <div class="chain-actions">
-        <button class="btn btn-sm" onclick="closeChainModal()">Cancelar</button>
-        <button class="btn btn-sm btn-primary" onclick="saveChainConfig()">💾 Guardar</button>
-      </div>
-    </div>`;
-}
-
-function toggleChainSource(id) {
-  const src = CHAIN_SOURCES.find(s => s.id === id);
-  if (src && src.fixed) return;
-  _chainEnabled[id] = !_chainEnabled[id];
-  renderChainModal();
-}
-
-let _dragId = null;
-function chainDragStart(e) { _dragId = e.target.dataset.id; e.target.classList.add('dragging'); }
-function chainDragEnd(e) { e.target.classList.remove('dragging'); _dragId = null; }
-function chainDragOver(e) { e.preventDefault(); }
-function chainDrop(e) {
-  e.preventDefault();
-  const targetId = e.target.closest('[data-id]')?.dataset.id;
-  if (!targetId || !_dragId || targetId === _dragId) return;
-  const targetSrc = CHAIN_SOURCES.find(s => s.id === targetId);
-  const dragSrc = CHAIN_SOURCES.find(s => s.id === _dragId);
-  if (targetSrc?.fixed || dragSrc?.fixed) return;
-  const fromIdx = _chainOrder.indexOf(_dragId);
-  const toIdx = _chainOrder.indexOf(targetId);
-  _chainOrder.splice(fromIdx, 1);
-  _chainOrder.splice(toIdx, 0, _dragId);
-  renderChainModal();
 }
 
 async function saveChainConfig() {
@@ -1146,6 +1196,80 @@ function closeChainModal() {
   const m = document.getElementById('chainModal');
   if (m) m.style.display = 'none';
 }
+
+/* ── Chain modal event delegation (set up once) ─────────────────────────── */
+(function initChainModal() {
+  document.addEventListener('DOMContentLoaded', () => {
+    const modal = document.getElementById('chainModal');
+    if (!modal) return;
+
+    // Click delegation — handles toggle, save, cancel, and background close
+    modal.addEventListener('click', (e) => {
+      // Toggle button
+      const toggleBtn = e.target.closest('[data-action="toggle"]');
+      if (toggleBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const sid = toggleBtn.dataset.sid;
+        const src = CHAIN_SOURCES.find(s => s.id === sid);
+        if (src && !src.fixed) {
+          _chainEnabled[sid] = !_chainEnabled[sid];
+          _renderChainList();
+        }
+        return;
+      }
+      // Save button
+      if (e.target.closest('[data-action="save"]')) {
+        e.preventDefault();
+        saveChainConfig();
+        return;
+      }
+      // Cancel button
+      if (e.target.closest('[data-action="cancel"]')) {
+        e.preventDefault();
+        closeChainModal();
+        return;
+      }
+      // Click on background overlay closes modal
+      if (e.target === modal) {
+        closeChainModal();
+      }
+    });
+
+    // Drag-and-drop delegation
+    let _dragId = null;
+    modal.addEventListener('dragstart', (e) => {
+      const li = e.target.closest('.chain-item[data-id]');
+      if (!li) return;
+      const src = CHAIN_SOURCES.find(s => s.id === li.dataset.id);
+      if (src?.fixed) { e.preventDefault(); return; }
+      _dragId = li.dataset.id;
+      li.classList.add('dragging');
+    });
+    modal.addEventListener('dragend', (e) => {
+      const li = e.target.closest('.chain-item[data-id]');
+      if (li) li.classList.remove('dragging');
+      _dragId = null;
+    });
+    modal.addEventListener('dragover', (e) => { e.preventDefault(); });
+    modal.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const li = e.target.closest('.chain-item[data-id]');
+      if (!li || !_dragId) return;
+      const targetId = li.dataset.id;
+      if (targetId === _dragId) return;
+      const targetSrc = CHAIN_SOURCES.find(s => s.id === targetId);
+      const dragSrc = CHAIN_SOURCES.find(s => s.id === _dragId);
+      if (targetSrc?.fixed || dragSrc?.fixed) return;
+      const fromIdx = _chainOrder.indexOf(_dragId);
+      const toIdx = _chainOrder.indexOf(targetId);
+      if (fromIdx < 0 || toIdx < 0) return;
+      _chainOrder.splice(fromIdx, 1);
+      _chainOrder.splice(toIdx, 0, _dragId);
+      _renderChainList();
+    });
+  });
+})();
 
 document.addEventListener('click', (e) => {
   const wrap = document.getElementById('collectionCombo');
@@ -1306,6 +1430,7 @@ async function regenerateImageGenaipro(chunkNumber) {
 
 // ── Image & Video Preview Modals ──────────────────────────────────────────
 let _videoModalSceneNum = null;
+let _isStockGlobal = false;
 
 function openVideoPreview(url, sceneNum) {
   _videoModalSceneNum = sceneNum;
@@ -1314,9 +1439,23 @@ function openVideoPreview(url, sceneNum) {
   const player = document.getElementById('videoPreviewPlayer');
   const label = document.getElementById('videoModalLabel');
   const textarea = document.getElementById('videoModalPrompt');
+  const saveBtn = document.getElementById('videoModalSaveBtn');
+  const regenBtn = document.getElementById('videoModalRegenBtn');
   player.src = url;
-  label.textContent = `Prompt de animación — Escena #${sceneNum}`;
-  textarea.value = prompt;
+
+  if (_isStockGlobal) {
+    // Stock mode — just show the video, no animation prompt
+    label.textContent = `Video — Escena #${sceneNum}`;
+    textarea.style.display = 'none';
+    if (saveBtn) saveBtn.style.display = 'none';
+    if (regenBtn) regenBtn.style.display = 'none';
+  } else {
+    label.textContent = `Prompt de animación — Escena #${sceneNum}`;
+    textarea.value = prompt;
+    textarea.style.display = '';
+    if (saveBtn) saveBtn.style.display = '';
+    if (regenBtn) regenBtn.style.display = '';
+  }
   modal.style.display = '';
 }
 
@@ -1377,10 +1516,8 @@ function openImagePreview(url, sceneNum) {
   const missingPrompt = !prompt && sceneText;
   const overlay = document.createElement('div');
   overlay.className = 'image-modal';
-  overlay.innerHTML = `
-    <div class="media-modal-content" onclick="event.stopPropagation()">
-      <button class="video-modal-close" onclick="this.closest('.image-modal').remove()">&times;</button>
-      <img src="${url}" alt="Escena #${sceneNum}" style="width:100%;border-radius:8px;" />
+
+  const promptSection = _isStockGlobal ? '' : `
       <div class="modal-prompt-section">
         <label class="modal-prompt-label">Prompt de imagen — Escena #${sceneNum}${missingPrompt ? ' <span style="color:var(--yellow);font-weight:400">(usando texto de escena — sin prompt guardado)</span>' : ''}</label>
         <textarea id="modal_image_prompt_${sceneNum}" class="modal-prompt-textarea" rows="3">${escHtml(displayPrompt)}</textarea>
@@ -1388,7 +1525,13 @@ function openImagePreview(url, sceneNum) {
           <button class="btn btn-ghost btn-sm" onclick="saveImagePromptFromModal(${sceneNum})">💾 Guardar prompt</button>
           <button class="btn btn-primary btn-sm" onclick="saveAndRegenerateImage(${sceneNum})">🔄 Regenerar imagen</button>
         </div>
-      </div>
+      </div>`;
+
+  overlay.innerHTML = `
+    <div class="media-modal-content" onclick="event.stopPropagation()">
+      <button class="video-modal-close" onclick="this.closest('.image-modal').remove()">&times;</button>
+      <img src="${url}" alt="Escena #${sceneNum}" style="width:100%;border-radius:8px;" />
+      ${promptSection}
     </div>
   `;
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
@@ -2694,6 +2837,108 @@ async function searchStockAssets() {
   }
 }
 
+async function retryStockSearch(chunkNumber) {
+  if (!currentProjectId) return;
+  showToast(`🔍 Rebuscando asset para escena ${chunkNumber}…`, 'info');
+  try {
+    await apiFetch(`/api/projects/${currentProjectId}/retry-chunk-image/${chunkNumber}`, { method: 'POST' });
+    await refreshDetail(currentProjectId);
+  } catch (e) {
+    showToast('Error al rebuscar: ' + e.message, 'error');
+  }
+}
+
+function renderAssetTypeFilters() {
+  const container = document.getElementById('assetTypeFilters');
+  if (!container) return;
+  container.innerHTML = ALL_ASSET_TYPES.map(t => {
+    const active = _activeAssetTypes.has(t.key) ? 'active' : '';
+    return `<span class="atf-chip ${t.key} ${active}" data-type="${t.key}" onclick="toggleAssetFilter('${t.key}')">${t.icon} ${t.label}</span>`;
+  }).join('');
+}
+
+function toggleAssetFilter(key) {
+  if (_activeAssetTypes.has(key)) {
+    if (_activeAssetTypes.size <= 1) return; // keep at least 1
+    _activeAssetTypes.delete(key);
+  } else {
+    _activeAssetTypes.add(key);
+  }
+  renderAssetTypeFilters();
+}
+
+async function planScenes() {
+  if (!currentProjectId) return;
+  const btn = document.getElementById('btnPlanScenesTop');
+  const origText = btn ? btn.textContent : '🧠 Planificar';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Planificando…'; }
+
+  try {
+    const allowedTypes = [..._activeAssetTypes];
+    await apiFetch(`/api/projects/${currentProjectId}/plan-scenes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ allowed_types: allowedTypes }),
+    });
+    showToast('🧠 Planificación iniciada — Claude analiza cada escena…', 'info');
+    stopPolling();
+    await refreshDetail(currentProjectId);
+    pollInterval = setInterval(() => refreshDetail(currentProjectId), 3000);
+  } catch (e) {
+    showToast('Error al planificar escenas: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = origText; }
+  }
+}
+
+function toggleAssetDropdown(badge, projectId, chunkNumber) {
+  // Close any existing dropdown
+  const existing = document.querySelector('.asset-dropdown');
+  if (existing) { existing.remove(); return; }
+
+  const types = [
+    { id: 'clip_bank', icon: '🎬', label: 'Clip Bank' },
+    { id: 'title_card', icon: '📝', label: 'Titulo' },
+    { id: 'web_image', icon: '🌐', label: 'Img Web' },
+    { id: 'stock_video', icon: '📹', label: 'Stock Video' },
+    { id: 'ai_image', icon: '🤖', label: 'AI Image' },
+    { id: 'archive_footage', icon: '🏛️', label: 'Archivo' },
+  ];
+
+  const dd = document.createElement('div');
+  dd.className = 'asset-dropdown';
+  dd.innerHTML = types.map(t =>
+    `<div class="asset-dropdown-item" data-type="${t.id}">${t.icon} ${t.label}</div>`
+  ).join('');
+
+  badge.style.position = 'relative';
+  badge.appendChild(dd);
+
+  dd.addEventListener('click', async (e) => {
+    const item = e.target.closest('.asset-dropdown-item');
+    if (!item) return;
+    const newType = item.dataset.type;
+    dd.remove();
+    try {
+      await apiFetch(`/api/projects/${projectId}/chunk/${chunkNumber}/asset-type`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ asset_type: newType }),
+      });
+      await refreshDetail(projectId);
+    } catch (err) {
+      showToast('Error al cambiar tipo: ' + err.message, 'error');
+    }
+  });
+
+  // Close on outside click
+  setTimeout(() => {
+    document.addEventListener('click', function _close(ev) {
+      if (!dd.contains(ev.target)) { dd.remove(); document.removeEventListener('click', _close); }
+    });
+  }, 10);
+}
+
 async function startVeo3Animation() {
   if (!currentProjectId) return;
   const btn = document.getElementById('startVeo3AnimationBtn');
@@ -2970,11 +3215,12 @@ function _buildTimeline(project, chunks) {
     clip.draggable = true;
     clip.dataset.idx = idx;
 
+    const tlCacheBust = c.updated_at ? `?t=${new Date(c.updated_at).getTime()}` : `?t=${Date.now()}`;
     let mediaHtml = '';
     if (hasVid) {
-      mediaHtml = `<video src="/api/projects/${project.id}/chunk/${n}/video" preload="metadata" muted></video>`;
+      mediaHtml = `<video src="/api/projects/${project.id}/chunk/${n}/video${tlCacheBust}" preload="metadata" muted></video>`;
     } else if (hasImg) {
-      mediaHtml = `<img src="/api/projects/${project.id}/chunk/${n}/image" loading="lazy" />`;
+      mediaHtml = `<img src="/api/projects/${project.id}/chunk/${n}/image${tlCacheBust}" loading="lazy" />`;
     } else {
       mediaHtml = `<div style="width:100%;height:40px;background:var(--bg4);"></div>`;
     }
